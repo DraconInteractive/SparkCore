@@ -1,4 +1,5 @@
 #pragma once
+#include "authorization.hpp"
 #include "database.hpp"
 #include <httplib.h>
 #include <condition_variable>
@@ -36,6 +37,6 @@ private:
     bool stopping_ = false;
     std::thread worker_;
 };
-void configure_timers(httplib::Server& server, std::shared_ptr<TimerStore> store);
+void configure_timers(httplib::Server& server, std::shared_ptr<TimerStore> store, std::shared_ptr<Authorization> auth = nullptr);
 nlohmann::json timer_endpoints();
 }

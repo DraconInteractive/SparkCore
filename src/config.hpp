@@ -12,6 +12,7 @@ public:
 struct AuthConfig {
     std::string provider;
     std::filesystem::path credentials_file;
+    std::string browser_origin;
 };
 struct ServerConfig {
     std::string host = "0.0.0.0";
@@ -20,6 +21,9 @@ struct ServerConfig {
     DatabaseConfig database;
     std::vector<std::filesystem::path> drives;
     std::optional<AuthConfig> auth;
+    std::optional<int> tls_notification_port;
+    bool remote = false;
+    nlohmann::json public_notifications() const;
     bool check_only = false;
     bool help = false;
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "database.hpp"
+#include "authorization.hpp"
 #include <memory>
 #include <chrono>
 #include <unordered_set>
@@ -19,6 +20,7 @@ private:
     DatabaseConfig config_;
 };
 struct NotificationOptions {
+    std::shared_ptr<IdentityProvider> identity_provider = std::make_shared<OpenIdentityProvider>();
     std::string host = "0.0.0.0";
     int port = 47684;
     std::chrono::milliseconds heartbeat{30000};

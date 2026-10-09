@@ -260,8 +260,8 @@ void FileStorage::mount_roots(bool startup){
             sync_directory();
         }catch(...){for(auto& drive:drives_){if(drive.lock>=0)close(drive.lock);if(drive.fd>=0)close(drive.fd);drive.lock=drive.fd=-1;drive.id.clear();}throw;}
 }
-void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storage){
-    auto upload=[storage](const httplib::Request& request,httplib::Response& response,const httplib::ContentReader& read){
+void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storage, std::shared_ptr<Authorization> auth){
+    auto upload=[storage,auth](const httplib::Request& request,httplib::Response& response,const httplib::ContentReader& read){
         // Close after rejected uploads: their unread bodies must not become another request.
         auto bad=[&](int status,const char* code){response.set_header("Connection","close");failure(response,status,code);};
         if(request.get_header_value("Content-Type")!="application/octet-stream"){bad(415,"unsupported_media_type");return;}
@@ -290,6 +290,7 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
             });
             if(io_error)throw StorageError(io_error);
             if(!complete){cleanup();bad(400,"incomplete_upload");return;}
+            if(auth&&!auth->request(request,response)){cleanup();return;}
             sync_fd(file.fd);
             if(rename(storage->path(id,true).c_str(),storage->path(id).c_str()))throw StorageError(errno);
             storage->sync_directory();
@@ -303,7 +304,7 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
         catch(const std::exception&){cleanup();bad(503,"storage_unavailable");}
     };
     server.Post("/files",upload);
-    server.Put(R"(/files/([^/]+)/content)",[storage](const httplib::Request& request,httplib::Response& response,const httplib::ContentReader& read){
+    server.Put(R"(/files/([^/]+)/content)",[storage,auth](const httplib::Request& request,httplib::Response& response,const httplib::ContentReader& read){
         auto bad=[&](int status,const char* code){response.set_header("Connection","close");failure(response,status,code);};
         const auto id=request.matches[1].str();
         if(!valid_id(id)){bad(400,"invalid_file_id");return;}
@@ -315,6 +316,7 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
         if(request.get_header_value_count("If-Match")!=1){bad(428,"precondition_required");return;}
         std::string body;bool large=false;
         if(!read([&](const char* data,std::size_t size){if(size>2097152-body.size()){large=true;return false;}body.append(data,size);return true;})){bad(large?413:400,large?"payload_too_large":"incomplete_upload");return;}
+        if(auth&&!auth->request(request,response))return;
         try {json(body).dump();}catch(const json::exception&){bad(400,"invalid_text");return;}
         for(unsigned char c:body)if((c<32 && c!=9 && c!=10 && c!=13) || c==127){bad(400,"invalid_text");return;}
         // Serialize replacements against reads, moves, deletes and project mutations.
@@ -416,8 +418,8 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
         catch(const DatabaseError&){failure(response,503,"database_unavailable");}
         catch(const std::exception&){failure(response,503,"storage_unavailable");}
     };
-    server.Get("/files/drives",drive_handler);body_route(server,"POST","/files/drives",drive_handler);
-    body_route(server,"DELETE",R"(/files/drives/([A-Z]+))",drive_handler);
+    server.Get("/files/drives",drive_handler);body_route(server,"POST","/files/drives",drive_handler,auth);
+    body_route(server,"DELETE",R"(/files/drives/([A-Z]+))",drive_handler,auth);
     server.Get("/files/explorer",[](const auto&,auto& response){response.set_content(std::string(file_explorer_html),"text/html; charset=utf-8");});
     auto directories=[storage](const httplib::Request& request,httplib::Response& response){
         for(const auto& [key,value]:request.params)if(request.method!="GET"&&request.method!="HEAD"||key!="drive"||request.get_param_value_count(key)!=1){failure(response,400,"invalid_parameters");return;}
@@ -436,10 +438,10 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
         }catch(const std::invalid_argument& error){failure(response,std::string(error.what())=="drive_not_found"?404:409,error.what());}
         catch(const DatabaseError&){failure(response,503,"database_unavailable");}catch(const std::exception&){failure(response,503,"storage_unavailable");}
     };
-    server.Get("/files/directories",directories);body_route(server,"POST","/files/directories",directories);
-    body_route(server,"PATCH",R"(/files/([^/]+))",handler);
+    server.Get("/files/directories",directories);body_route(server,"POST","/files/directories",directories,auth);
+    body_route(server,"PATCH",R"(/files/([^/]+))",handler,auth);
     server.Get("/files",handler);server.Get(R"(/files/([^/]+))",handler);server.Get(R"(/files/([^/]+)/content)",handler);
-    body_route(server,"DELETE",R"(/files/([^/]+))",handler);
+    body_route(server,"DELETE",R"(/files/([^/]+))",handler,auth);
 }
 json file_endpoints(){
     const json file={{"id","12345678-1234-1234-1234-123456789abc"},{"name","example.bin"},{"directory","/"},{"drive_id","0123456789abcdef0123456789abcdef"},{"drive_letter","A"},{"size_bytes",1024},{"content_revision",""},{"content_type","application/octet-stream"},{"download_url","/files/12345678-1234-1234-1234-123456789abc/content"},{"created_at","2026-09-19T00:00:00.000000Z"}};

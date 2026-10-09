@@ -976,7 +976,7 @@ json BoardStore::execute(const std::string& project,const std::string& board_id,
 namespace spark {
 namespace {
 const std::string command_projection =
-    "JSON_OBJECT('id',id,'source_device',source_device,'target_device',target_device,"
+    "JSON_OBJECT('id',id,'source_device',source_device,'source_admin',source_admin,'target_device',target_device,"
     "'executing_device',executing_device,'action',action,'input',JSON_EXTRACT(input,'$'),"
     "'idempotency_key',idempotency_key,'expires_in_seconds',expires_in_seconds,'status',status,"
     "'result',JSON_EXTRACT(result,'$'),'error',JSON_EXTRACT(error,'$'),"
@@ -1033,19 +1033,20 @@ json CommandStore::actions(const std::string& device,const json& replacement) co
     }
     tx.commit();return {{"device_id",device},{"actions",current}};
 }
-json CommandStore::create(const json& p) const {
+json CommandStore::create(const json& p,const std::optional<std::string>& administrator) const {
     Connection c(config_);Transaction tx(c);queue_lock(c);sweep_commands(c);
-    const auto source=p["source_device"].get<std::string>();const auto target=p.value("target_device",json(nullptr));
-    Statement existing(c,"SELECT JSON_QUOTE(id) FROM commands WHERE source_device=? AND idempotency_key=?",{source,p["idempotency_key"].get<std::string>()});existing.execute();auto ids=existing.rows();
+    const json source=administrator?json(nullptr):p.at("source_device");const auto target=p.value("target_device",json(nullptr));
+    const std::string requester=administrator?"admin:"+*administrator:"device:"+source.get<std::string>();
+    Statement existing(c,"SELECT JSON_QUOTE(id) FROM commands WHERE requester_key=? AND idempotency_key=?",{requester,p["idempotency_key"].get<std::string>()});existing.execute();auto ids=existing.rows();
     if(!ids.empty()) {
         auto record=read_command(c,ids[0]);
         if(record["target_device"]!=target || record["action"]!=p["action"] || record["input"]!=p.value("input",json::object()) || record["expires_in_seconds"]!=p.value("expires_in_seconds",300))throw CommandError(409,"idempotency_conflict");
         tx.commit();return record;
     }
-    require_device(c,source);if(!target.is_null())require_device(c,target);
+    if(!administrator)require_device(c,source);if(!target.is_null())require_device(c,target);
     Statement uuid(c,"SELECT JSON_QUOTE(UUID())");uuid.execute();std::string id=uuid.rows()[0];
     auto seconds=std::to_string(p.value("expires_in_seconds",300));
-    Statement insert(c,"INSERT INTO commands(id,source_device,target_device,action,input,idempotency_key,expires_in_seconds,expires_at) VALUES (?,?,?,?,?,?,?,TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(6)))",{id,source,nullable_string(target),p["action"].get<std::string>(),p.value("input",json::object()).dump(),p["idempotency_key"].get<std::string>(),seconds,seconds});insert.execute();
+    Statement insert(c,"INSERT INTO commands(id,source_device,source_admin,target_device,action,input,idempotency_key,expires_in_seconds,expires_at) VALUES (?,?,?,?,?,?,?,?,TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(6)))",{id,nullable_string(source),administrator?std::optional<std::string>(*administrator):std::nullopt,nullable_string(target),p["action"].get<std::string>(),p.value("input",json::object()).dump(),p["idempotency_key"].get<std::string>(),seconds,seconds});insert.execute();
     auto record=read_command(c,id);command_event(c,"command.available",record);command_event(c,"command.updated",record);tx.commit();return record;
 }
 json CommandStore::get(const std::string& id) const {
@@ -1070,10 +1071,10 @@ json CommandStore::claim(const std::string& device,int lease_seconds,const std::
     Statement update(c,"UPDATE commands SET status='running',executing_device=?,claim_token=?,lease_expires_at=TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{device,token,std::to_string(lease_seconds),id});update.execute();
     auto record=read_command(c,id);command_event(c,"command.updated",record);tx.commit();record["claim_token"]=token;return {{"command",record}};
 }
-json CommandStore::transition(const std::string& id,const std::string& operation,const json& p) const {
+json CommandStore::transition(const std::string& id,const std::string& operation,const json& p,const std::optional<std::string>& administrator) const {
     Connection c(config_);Transaction tx(c);queue_lock(c);sweep_commands(c);auto record=read_command(c,id);
     if(operation=="cancel") {
-        if(record["source_device"]!=p["source_device"])throw CommandError(403,"source_device_mismatch");
+        if(administrator ? record["source_admin"]!=*administrator : (!record["source_admin"].is_null()||record["source_device"]!=p["source_device"]))throw CommandError(403,"source_device_mismatch");
         if(record["status"]=="cancelled"){tx.commit();return record;}
         if(record["status"]!="queued")throw CommandError(409,"invalid_command_state");
         Statement update(c,"UPDATE commands SET status='cancelled',updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{id});update.execute();

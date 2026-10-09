@@ -34,7 +34,7 @@ bool public_ip(const std::string& value) {
         !(b[0] == 0x20 && b[1] == 0x02) && !(b[0] == 0x3f && b[1] == 0xff);
 }
 }
-void configure_devices(httplib::Server& server, std::shared_ptr<DeviceStore> registry) {
+void configure_devices(httplib::Server& server, std::shared_ptr<DeviceStore> registry, std::shared_ptr<Authorization> auth) {
     auto handler = [registry](const httplib::Request& request, httplib::Response& response) {
         const auto id = request.matches[1].str();
         if (!std::regex_match(id, std::regex("[A-Za-z0-9_-]{1,64}"))) {
@@ -101,9 +101,9 @@ void configure_devices(httplib::Server& server, std::shared_ptr<DeviceStore> reg
         }
     };
     server.Get(R"(/devices/([^/]+))", handler);
-    body_route(server,"POST",R"(/devices/([^/]+))", handler);
-    body_route(server,"PATCH",R"(/devices/([^/]+))", handler);
-    body_route(server,"DELETE",R"(/devices/([^/]+))", handler);
+    body_route(server,"POST",R"(/devices/([^/]+))",handler,auth);
+    body_route(server,"PATCH",R"(/devices/([^/]+))",handler,auth);
+    body_route(server,"DELETE",R"(/devices/([^/]+))",handler,auth);
 }
 
 json device_endpoints() {

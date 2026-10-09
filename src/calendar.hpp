@@ -1,4 +1,5 @@
 #pragma once
+#include "authorization.hpp"
 #include "database.hpp"
 #include <httplib.h>
 #include <memory>
@@ -36,6 +37,6 @@ private:
     bool stopping_ = false;
     std::thread worker_;
 };
-void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> store);
+void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> store, std::shared_ptr<Authorization> auth = nullptr);
 nlohmann::json calendar_endpoints();
 }

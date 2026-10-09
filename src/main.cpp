@@ -17,7 +17,7 @@
 #include <iostream>
 #include <string>
 
-int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Maintenance> maintenance) {
+int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Maintenance> maintenance,std::shared_ptr<spark::Authorization> auth) {
     const auto& host = config.host;
     const int port = config.port;
     const int notification_port = config.notification_port;
@@ -47,7 +47,7 @@ int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Mainten
         spark::ProjectStore(spark::DatabaseConfig::from_environment()).verify();
         spark::BoardStore(spark::DatabaseConfig::from_environment()).verify();
         files->initialize();
-        spark::configure_api(server, std::move(store), timers, notification_port, pulse, calendar, tasks, files, maintenance);
+        spark::configure_api(server, std::move(store), timers, notification_port, pulse, calendar, tasks, files, maintenance, auth, config.public_notifications());
     } catch (const std::exception& error) {
         std::cerr << "Startup check failed: " << error.what() << '\n';
         return 1;
@@ -61,6 +61,7 @@ int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Mainten
         spark::NotificationOptions options;
         options.host = host;
         options.port = notification_port;
+        if(auth)options.identity_provider=auth->provider();
         notifications = std::make_unique<spark::NotificationServer>(events, options);
     } catch (const std::exception& error) {
         std::cerr << "Notification startup failed: " << error.what() << '\n';
@@ -92,10 +93,12 @@ int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Mainten
 
 int main(int argc, char** argv) {
     spark::ServerConfig config;
+    std::shared_ptr<spark::Authorization> auth;
     try {
         config = spark::ServerConfig::load(argc, argv);
         if (config.help) {
-            std::cout << "Usage: spark_server [--config FILE] [--host ADDRESS] [--port PORT] [--notification-port PORT] [--check-config]\n"
+            std::cout << "Usage: spark_server [--config FILE] [--host ADDRESS] [--port PORT] [--notification-port PORT] [--check-config] [--remote]\n"
+                      << "--remote requires authenticated, loopback-only TLS proxy configuration.\n"
                       << "--check-config validates without starting services; reports runtime blockers.\n";
             return 0;
         }
@@ -105,14 +108,15 @@ int main(int argc, char** argv) {
         }
         config.require_supported_runtime();
         config.apply_environment();
+        if(config.auth)auth=std::make_shared<spark::Authorization>(std::make_shared<spark::TokenIdentityProvider>(config.auth->credentials_file),config.auth->browser_origin);
     } catch (const std::exception& error) {
         std::cerr << "Configuration error: " << error.what() << '\n';
         return 2;
     }
-    std::cout << "Authentication mode: open" << std::endl;
+    std::cout << "Authentication mode: " << (config.auth ? "tokens" : "open") << std::endl;
     auto maintenance = std::make_shared<spark::Maintenance>();
     for (;;) {
-        int result = run_server(config, maintenance);
+        int result = run_server(config, maintenance,auth);
         if (!maintenance->requested) return result;
         // All HTTP handlers, schedulers, TCP clients and storage locks are now gone.
         try {

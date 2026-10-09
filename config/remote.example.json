@@ -1,0 +1,14 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 47683,
+    "notification_port": 47684,
+    "tls_notification_port": 47685
+  },
+  "storage": { "drives": ["../storage/files"] },
+  "auth": {
+    "provider": "tokens",
+    "credentials_file": "credentials.json",
+    "browser_origin": "https://spark.example.net:48443"
+  }
+}

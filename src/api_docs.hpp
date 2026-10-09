@@ -22,6 +22,7 @@ main{overflow-y:auto;padding:38px 44px;min-width:0;scroll-behavior:smooth}articl
 <aside><div class="search"><label for="search">Find an endpoint</label><input id="search" type="search" placeholder="Search method, path or description" autocomplete="off"><p id="count" role="status">Loading endpoints…</p></div><nav id="endpoints" aria-label="API endpoints"></nav></aside>
 <main id="detail" tabindex="-1"><article id="content" aria-live="polite"><h1>API reference</h1><p>Loading the current server contract…</p><noscript>JavaScript is required for this view. Read the <a href="/api">JSON API reference</a> instead.</noscript></article></main>
 </div>
+<script src="/auth/client.js"></script>
 <script>
 'use strict';
 const content=document.getElementById('content'), nav=document.getElementById('endpoints'), search=document.getElementById('search'), count=document.getElementById('count');

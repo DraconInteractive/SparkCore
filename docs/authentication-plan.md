@@ -1,6 +1,8 @@
+> Steps 1–5 are implemented: see [identity, credentials, permissions and transport enforcement](identity-permissions.md). Browser sessions are implemented; see [browser login](browser-login.md). See [encrypted remote deployment](remote-deployment.md).
+
 # Configuration and authentication implementation plan
 
-Agreed: 2026-10-09. Status: step 1 implemented; authentication enforcement is not implemented yet.
+Agreed: 2026-10-09. Status: steps 1–5 implemented; REST/TCP enforcement and browser sessions are available.
 
 See [instance configuration](configuration.md) for the implemented schema, precedence,
 validation and temporary startup restrictions.
@@ -112,17 +114,17 @@ discovery responses or error messages.
    compatibility. Test absent auth, valid auth, malformed/null/empty auth,
    unreadable credentials and missing requested configuration. Errors must not
    start an open server.
-2. **Shared identity and permissions.** Implement open and token providers,
+2. **Shared identity and permissions — implemented.** Implement open and token providers,
    credential provisioning/revocation, and an explicit authorization matrix.
    Decide credential storage representation and browser administrator login
    details before implementation; the example above does not specify these.
-3. **REST and TCP enforcement.** Cover every route, ownership check, command
+3. **REST and TCP enforcement — implemented.** Cover every route, ownership check, command
    operation and notification/replay path. Verify missing/invalid credentials,
    impersonation attempts, insufficient permissions and revoked credentials.
-4. **Browser login and explorer integration.** Protect sessions and state-changing
+4. **Browser login and explorer integration — implemented.** Protect sessions and state-changing
    requests; verify file viewing/downloading/editing, command submission and
    administrator controls still work for authorized users.
-5. **Remote deployment and regression tests.** Provide encrypted deployment
+5. **Remote deployment and regression tests — implemented.** Provide encrypted deployment
    configuration for both channels. Verify there are no unprotected alternate
    routes/listeners and run the existing open-mode suite plus authenticated
    integration tests, including reconnect, replay and maintenance restart.
@@ -133,9 +135,33 @@ paths resolve beside the specified config. Configuration is fixed for the proces
 lifetime and shared with dashboard restarts/backups. `--check-config` validates
 without startup and reports runtime blockers. Unknown/duplicate fields fail.
 
-Until later phases implement enforcement, even structurally valid `auth` causes
-normal startup to refuse service; it never starts open. Credential document syntax
-and readability are checked, but credential-record validation belongs to step 2.
+Step 3 decisions: all REST routes (including HTML, health, HEAD, file content and
+maintenance) authenticate before routing/body intake. Unknown method/path pairs
+are denied by default. JSON attribution checks run after bounded body intake and
+before mutation. Authenticated mode has no CORS/OPTIONS access until browser policy
+is implemented; open-mode CORS is unchanged. TCP hello includes `token`, checks
+ownership of `device_id`, and applies domain permissions to live and replayed
+notifications. Active credentials are rechecked before socket output; revocation
+or permission changes disconnect the session. In-flight HTTP operations/downloads
+may finish. See [the protocol details and matrix](identity-permissions.md).
+
+Step 4 decisions: administrator-token login, process-local random sessions with
+Secure/HttpOnly/SameSite=Strict cookies, eight-hour absolute and 30-minute idle
+expiry, and per-session CSRF plus exact configured HTTPS Origin/Host checks.
+`auth.browser_origin` opts in to browser login without trusting forwarded headers.
+Sessions survive dashboard maintenance, but not process restarts. Revocation and
+permission changes invalidate sessions on access. Native bearer requests remain
+supported. Administrator commands use server-derived `source_admin` rather than
+fake browser devices (migration 019). See [browser login](browser-login.md).
+
+Step 5 decisions: same-host nginx terminates HTTPS and notification TCP TLS;
+`server.tls_notification_port` requires token mode, an HTTPS browser origin and
+loopback-only backends. Production launches retain `--remote` to reject accidental
+profile removal. Discovery advertises the public TLS hostname/port. The standalone
+proxy preserves Host, strips forwarding headers, provides no plaintext front door,
+and supports unbuffered file transfers. Real-nginx regression tests cover both
+channels and maintenance. See [deployment instructions](remote-deployment.md).
+No live instance is automatically exposed or deployed.
 
 Storage uses `storage.drives`, an array of paths. Multi-drive placement, persistent
 drive identities, legacy file assignment and backup/restore are implemented ahead

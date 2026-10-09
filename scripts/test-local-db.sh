@@ -32,13 +32,21 @@ export SPARK_FILE_DIR="$test_dir/files"
 unset SPARK_TEST_AUDIT_FAILURE
 {
     printf 'CREATE DATABASE spark_test_local; USE spark_test_local;\n'
-    cat sql/001_devices.sql sql/002_timers.sql sql/003_notifications.sql sql/004_pulse.sql sql/005_pulse_subscriptions.sql sql/006_calendar.sql sql/007_daily_tasks.sql sql/008_calendar_recurrence.sql sql/009_files.sql sql/010_file_directories.sql sql/011_projects.sql sql/012_project_hierarchy.sql sql/013_project_boards.sql sql/014_file_revisions.sql sql/015_commands.sql sql/016_storage_drives.sql sql/017_runtime_drives.sql sql/018_drive_directories.sql
+    cat sql/001_devices.sql sql/002_timers.sql sql/003_notifications.sql sql/004_pulse.sql sql/005_pulse_subscriptions.sql sql/006_calendar.sql sql/007_daily_tasks.sql sql/008_calendar_recurrence.sql sql/009_files.sql sql/010_file_directories.sql sql/011_projects.sql sql/012_project_hierarchy.sql sql/013_project_boards.sql sql/014_file_revisions.sql sql/015_commands.sql sql/016_storage_drives.sql sql/017_runtime_drives.sql sql/018_drive_directories.sql sql/019_command_administrators.sql
 } | mariadb --no-defaults --socket="$test_dir/mysql.sock" --user=root
 ctest --test-dir build --output-on-failure --verbose || {
     mariadb --no-defaults --socket="$test_dir/mysql.sock" --user=root spark_test_local -e "SET time_zone='+00:00'; SELECT CURRENT_TIMESTAMP(6),pulse.* FROM pulse; SELECT event_id,type,resource FROM events ORDER BY event_id DESC LIMIT 10;"
     exit 1
 }
 python3 ./scripts/test-commands.py
+SPARK_TEST_TLS=0 python3 ./scripts/test-authentication.py
+if [ -n "${SPARK_TEST_NGINX:-}" ]; then
+    python3 ./scripts/test-proxy-config.py
+    SPARK_TEST_TLS=1 python3 ./scripts/test-authentication.py
+else
+    echo 'TLS proxy tests not selected; set SPARK_TEST_NGINX to the nginx executable to include them.'
+fi
+python3 ./scripts/test-browser-sessions.py
 
 # Restart MariaDB itself, then verify durable timer records and committed events.
 mariadb-admin --no-defaults --socket="$test_dir/mysql.sock" --user=root shutdown

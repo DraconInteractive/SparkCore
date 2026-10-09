@@ -7,17 +7,18 @@ SPARK can load a JSON configuration file:
 ```
 
 Use [the open-mode example](../config/open.example.json) as a starting point. It
-binds to loopback. To accept LAN connections, explicitly set `server.host` to the
-appropriate interface or `0.0.0.0`. Authentication and encrypted remote transport
-are later phases of the [authentication plan](authentication-plan.md).
+binds to all interfaces for LAN use. The [token-mode example](../config/tokens.example.json)
+binds to loopback and requires a provisioned credential file. Configure the
+appropriate interface for your network. Use [the remote profile](remote-deployment.md) for encrypted remote deployment.
 
 ## Current scope
 
-Step 1 implements configuration and validation. A configuration without `auth`
-starts in the existing open mode. **Any configured authentication prevents startup
-in this version**, even when the configuration is structurally valid, because
-enforcement has not been implemented. A malformed or unreadable authentication
-configuration is an error; there is no fallback to open mode.
+Steps 1–5 implement configuration, shared identity/permissions, and REST/TCP
+enforcement. A configuration without `auth` starts in the existing open mode.
+With `auth`, every REST endpoint requires a bearer token and TCP hello requires a
+`token`. Invalid/unreadable authentication configuration fails startup; there is
+no fallback to open mode. Browser sessions require `auth.browser_origin`;
+[remote deployment](remote-deployment.md) protects both channels with TLS. See [identity and permissions](identity-permissions.md).
 
 Storage supports up to 64 attached roots, plus a registry of previously used
 removable drives. Apply migration 018 using `./scripts/setup-db.sh` before launching
@@ -88,8 +89,12 @@ No storage directories are created during parsing or `--check-config`.
 }
 ```
 
-- `server`: optional `host`, `port`, `notification_port`. Ports are JSON integers
+- `server`: optional `host`, `port`, `notification_port`, `tls_notification_port`. Ports are JSON integers
   1..65535, and the effective HTTP and notification ports must differ.
+  `tls_notification_port` opts into the remote proxy profile: token auth, HTTPS
+  `browser_origin`, host `127.0.0.1`, and four distinct public/backend ports are
+  required. Keep `--remote` in remote launches to fail closed if this profile is
+  accidentally removed. See [deployment](remote-deployment.md).
 - `database`: optional `host`, `port`, `name`, `user`, `socket`. An empty socket
   leaves socket selection to the connector. The database password remains in
   `SPARK_DB_PASSWORD`; a `password` field is intentionally not accepted.
@@ -100,13 +105,15 @@ No storage directories are created during parsing or `--check-config`.
   including aliases through existing symlinks. Validation does not mount drives,
   verify external mounts/capacity, or write data. Replace the earlier proposed
   `storage.directory` with `storage.drives`; the single-path key is rejected.
-- `auth`: if present, must be an object with exactly the required fields
-  `provider: "tokens"` and `credentials_file: "path/to/credentials.json"`.
+- `auth`: if present, must be an object with the required fields
+  `provider: "tokens"` and `credentials_file: "path/to/credentials.json"`, plus
+  optional `browser_origin: "https://spark.example.com"` for browser sessions.
+  See [browser login](browser-login.md) for origin validation and proxy requirements.
   Null, empty, false, unsupported providers and unknown keys are errors.
   The referenced file must be a readable regular file containing a nonempty JSON
-  object without duplicate keys, at most 1 MiB. Credential-record schema and
-  cryptographic validation are deferred to step 2. Passing these structural checks
-  does **not** mean credentials have been authenticated or the server can start.
+  object without duplicate keys, at most 1 MiB. Step 2 validates the complete
+  [credential schema and private file permissions](identity-permissions.md). Passing these checks
+  does not test a specific token, database connectivity or encrypted transport.
 
 Do not put real tokens into example files or commit instance secrets. Validation
 messages do not echo document contents, credential records or database passwords.
@@ -157,12 +164,13 @@ export, not a configuration input; use JSON for initial roots and the drives API
 
 This returns a redacted JSON summary with `configuration_valid`,
 `runtime_supported`, `startup_blockers`, resolved listener settings/storage paths,
-and `auth_mode` (`open` or `required`). No database connection, directory creation
+`auth_mode` (`open` or `required`) and `remote`. Remote profiles also report
+`browser_origin` and `public_notifications`. No database connection, directory creation
 or network listener is attempted.
 
-Exit code 0 means structural validation passed. **Also inspect `runtime_supported`**
-before deployment: valid auth configurations report false with an explicit blocker.
-Ordinary startup refuses those configurations with exit code 2.
+Exit code 0 means configuration and credential validation passed. Both open and
+valid token configurations now report `runtime_supported: true` with no startup
+blockers. This does not mean the service is safe for unencrypted public access.
 Malformed/unreadable configurations also exit 2. `--help` must be used alone.
 
 This is not a database-connectivity, storage-writeability or TLS validation test.
@@ -172,7 +180,7 @@ Startup still performs its normal database, storage and binding checks afterward
 
 `ctest --test-dir build -R '^configuration$' --output-on-failure` tests defaults,
 precedence, relative paths, duplicate/unknown keys, invalid auth, unreadable and
-nonregular files, drive aliases/overlap, secret redaction and runtime refusal.
+nonregular files, drive aliases/overlap, secret redaction and token-mode validation.
 Python 3 is used only as a test harness; SPARK remains C++.
 
 `./scripts/test-local-db.sh` additionally launches a real configured instance with

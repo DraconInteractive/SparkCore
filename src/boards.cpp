@@ -7,7 +7,7 @@ using nlohmann::json;
 bool uuid(const std::string& s){return std::regex_match(s,std::regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));}
 bool text(const json& value,std::size_t max,bool nonblank){return value.is_string() && value.get_ref<const std::string&>().size()<=max && (!nonblank || value.get_ref<const std::string&>().find_first_not_of(" \t\r\n")!=std::string::npos);}
 }
-void configure_boards(httplib::Server& server,std::shared_ptr<BoardStore> store,std::shared_ptr<FileStorage> storage){
+void configure_boards(httplib::Server& server,std::shared_ptr<BoardStore> store,std::shared_ptr<FileStorage> storage, std::shared_ptr<Authorization> auth){
     auto route=[&](const std::string& pattern,const std::vector<std::string>& methods,const std::string& kind,int board_match,int item_match,bool column_tasks=false){
         auto handler=[=](const httplib::Request& req,httplib::Response& res){
             auto reply=[&](int status,const json& body){res.status=status;res.set_content(body.dump(2)+"\n","application/json");};
@@ -39,7 +39,7 @@ void configure_boards(httplib::Server& server,std::shared_ptr<BoardStore> store,
             }catch(const std::invalid_argument& e){const std::string code=e.what();bad(code=="name_conflict" || code=="column_not_empty"?409:404,code);}
             catch(const DatabaseError&){bad(503,"database_unavailable");}
         };
-        for(const auto& method:methods)if(method=="GET")server.Get(pattern,handler);else body_route(server,method,pattern,handler);
+        for(const auto& method:methods)if(method=="GET")server.Get(pattern,handler);else body_route(server,method,pattern,handler,auth);
     };
     route(R"(/projects/([^/]+)/boards)",{"GET","POST"},"board",0,0);
     route(R"(/projects/([^/]+)/boards/([^/]+))",{"GET","PATCH","DELETE"},"board",2,0);

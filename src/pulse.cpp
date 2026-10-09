@@ -29,7 +29,7 @@ PulseScheduler::~PulseScheduler() {
     wake_.notify_all();
     worker_.join();
 }
-void configure_pulse(httplib::Server& server, std::shared_ptr<PulseStore> store) {
+void configure_pulse(httplib::Server& server, std::shared_ptr<PulseStore> store, std::shared_ptr<Authorization> auth) {
     auto handler = [store](const httplib::Request& request, httplib::Response& response) {
         auto reply = [&](int status, const json& body) {
             response.status = status;
@@ -74,10 +74,10 @@ void configure_pulse(httplib::Server& server, std::shared_ptr<PulseStore> store)
             reply(200, {{"device_id", id}, {"subscribed", subscribed}});
         } catch (const DatabaseError&) { reply(503, {{"error", "database_unavailable"}}); }
     };
-    body_route(server,"POST",R"(/pulse/subscriptions/([^/]+))", subscription);
-    body_route(server,"DELETE",R"(/pulse/subscriptions/([^/]+))", subscription);
+    body_route(server,"POST",R"(/pulse/subscriptions/([^/]+))", subscription,auth);
+    body_route(server,"DELETE",R"(/pulse/subscriptions/([^/]+))", subscription,auth);
     server.Get("/pulse", handler);
-    body_route(server,"PATCH","/pulse", handler);
+    body_route(server,"PATCH","/pulse",handler,auth);
 }
 json pulse_endpoints() {
     json endpoints = json::array();

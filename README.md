@@ -13,7 +13,7 @@ On antiX/Debian, install and start MariaDB using its SysV service script:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y mariadb-server libmariadb-dev pkg-config
+sudo apt-get install -y mariadb-server libmariadb-dev libssl-dev pkg-config
 sudo service mariadb start
 ./scripts/setup-db.sh
 ```
@@ -21,7 +21,7 @@ sudo service mariadb start
 Run setup as the same OS user that will run SPARK. It creates the `spark` database,
 applies the numbered SQL schemas, and grants that user access through MariaDB's local
 Unix socket authentication. No database password is needed for this setup; HTTP
-remains unauthenticated. Existing MariaDB accounts are not changed by setup.
+is open unless `auth` is configured. Existing MariaDB accounts are not changed by setup.
 If the OS username already has a password-based MariaDB account, configure SPARK
 with that account's credentials instead. The app account receives CRUD on devices, SELECT/INSERT/UPDATE on timers, and
 SELECT/INSERT on history/events, with no schema-administration privileges.
@@ -34,7 +34,9 @@ cmake --build build -j2
 ```
 
 Default: HTTP on `0.0.0.0:47683`, accessible to devices using this machine's LAN IP.
-No authentication or TLS is enabled for this PoC. Stop with Ctrl+C.
+The default launch has no authentication or TLS. Configure token mode using the
+[identity guide](docs/identity-permissions.md), or use the guarded
+[remote deployment profile](docs/remote-deployment.md) for HTTPS and TCP TLS. Stop with Ctrl+C.
 Override the listener with `--host 127.0.0.1 --port 47684`.
 
 ```sh
@@ -125,7 +127,7 @@ Duplicate POST returns 409; GET/PATCH/DELETE for a missing ID return 404. Invali
 IDs, IPs, unknown fields, or empty updates return 400. Incorrect content types
 return 415. Error responses contain `error`; invalid IP errors also name `field`.
 Device paths support OPTIONS with GET/HEAD/POST/PATCH/DELETE and JSON CORS preflight.
-All registry operations are unauthenticated, as with the rest of this PoC.
+Registry operations are open by default; token mode enforces device permissions and ownership.
 `/api` describes all twenty-seven endpoints, including device and timer request/response packets.
 
 ## Database operations
@@ -189,7 +191,7 @@ invalid IDs return `400 {"error":"invalid_id"}`. Database failures return
 For an existing installation, stop SPARK, run `./scripts/setup-db.sh` to add the
 new tables and grants, then restart `./build/spark_server`. Existing device data
 is preserved. Version 0.11.0 requires all numbered schemas at startup; the API contract version
-is 1.10.0. HTTP remains on port 47683 with no authentication.
+is 1.10.0. HTTP remains on port 47683; authentication is enabled through instance configuration.
 
 | Endpoint | Input | Result |
 | --- | --- | --- |
@@ -278,7 +280,7 @@ Clients send a newline-terminated `{"type":"hello","device_id":"watch-1"}`,
 wait for welcome, and refresh `/timers`. Committed timer events then tell every
 connected client which REST resource changed. Reply to server ping messages with
 pong, and refresh REST state when welcome has `resync_required:true`. This is an
-unauthenticated raw TCP stream. Clients can resume using `after_sequence` to replay
+raw TCP stream; token mode requires a token in hello and filters events by permissions. Clients can resume using `after_sequence` to replay
 missed events.
 
 The complete client contract, examples, framing rules, heartbeat intervals, and
@@ -475,9 +477,10 @@ at `GET /commands/devices` (API 1.27.0).
 
 The agreed [configuration and authentication plan](docs/authentication-plan.md)
 tracks optional auth, shared REST/TCP identity and permissions, browser sessions,
-and secure remote deployment. Step 1 is implemented: see [instance configuration](docs/configuration.md)
-for `--config`, `--check-config`, precedence and the `storage.drives` array. Auth
-enforcement is pending; configuring auth currently blocks startup. Multiple drives
+and secure remote deployment. Steps 1–4 are implemented: see [identity and permissions](docs/identity-permissions.md) and [instance configuration](docs/configuration.md)
+for `--config`, `--check-config`, precedence and the `storage.drives` array. Configuring `auth` now enforces bearer tokens on REST and a token in TCP hello.
+[Browser login](docs/browser-login.md) is available with `auth.browser_origin`.
+Apply migration 019 for administrator commands. [Encrypted remote deployment](docs/remote-deployment.md) now covers both HTTPS and TCP TLS. Multiple drives
 are supported with persistent file locations, uploads directed to a chosen drive,
 and backups covering every drive. Apply migration 018 using `./scripts/setup-db.sh`
 before restarting the new binary. An open-mode example is provided in

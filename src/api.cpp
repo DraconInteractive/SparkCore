@@ -1,4 +1,5 @@
 #include "api.hpp"
+#include "browser_auth.hpp"
 #include "commands.hpp"
 #include "dashboard.hpp"
 #include "api_docs.hpp"
@@ -21,7 +22,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.30.0";
+constexpr auto api_version = "1.33.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -33,7 +34,7 @@ void reply(httplib::Response& response, const json& body) {
 }
 }
 
-void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registry, std::shared_ptr<TimerStore> timers, int notification_port, std::shared_ptr<PulseStore> pulse, std::shared_ptr<CalendarStore> calendar, std::shared_ptr<DailyTaskStore> tasks, std::shared_ptr<FileStorage> files, std::shared_ptr<Maintenance> maintenance) {
+void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registry, std::shared_ptr<TimerStore> timers, int notification_port, std::shared_ptr<PulseStore> pulse, std::shared_ptr<CalendarStore> calendar, std::shared_ptr<DailyTaskStore> tasks, std::shared_ptr<FileStorage> files, std::shared_ptr<Maintenance> maintenance, std::shared_ptr<Authorization> auth, const nlohmann::json& public_notifications) {
     if (!files) files = std::make_shared<FileStorage>(std::make_shared<FileStore>(DatabaseConfig::from_environment()), FileStorage::default_roots());
     if (!tasks) tasks = std::make_shared<DailyTaskStore>(DatabaseConfig::from_environment());
     if (!calendar) calendar = std::make_shared<CalendarStore>(DatabaseConfig::from_environment());
@@ -47,7 +48,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
           {"api_version", "string: semantic version of the API contract"}}},
         {"/api", "Discover all endpoints, input packets, output packets, and polling conventions.",
          json::object(), {{"name", "string: SPARK"}, {"server_version", "string: server release"},
-          {"api_version", "string: API contract revision"}, {"authentication", "string: none"},
+          {"api_version", "string: API contract revision"}, {"authentication", "string: none (open mode) or bearer (token mode)"},
           {"polling", "object: polling and compatibility guidance"},
           {"notifications", "object: TCP connection, framing, handshake, heartbeats, and reconnect contract"},
           {"errors", "array: shared HTTP error packets"},
@@ -68,6 +69,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         })},
         {"endpoints", json::array()}
     };
+    if(!public_notifications.is_null()) discovery["notifications"].update(public_notifications);
     for (const auto& endpoint : endpoints) {
         discovery["endpoints"].push_back({
             {"method", "GET"}, {"path", endpoint.path}, {"description", endpoint.description},
@@ -92,6 +94,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     for (const auto& endpoint : file_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : command_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : dashboard_endpoints()) discovery["endpoints"].push_back(endpoint);
+    for(const auto& endpoint:browser_endpoints())discovery["endpoints"].push_back(endpoint);
     // Keep the self-example independent of the size of the endpoint catalogue.
     discovery["endpoints"][2]["output"]["body"] = {
         {"name", "SPARK"}, {"server_version", SPARK_VERSION}, {"api_version", api_version},
@@ -100,6 +103,27 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     };
     discovery["endpoints"][2]["output"]["example_note"] =
         "Abbreviated response shape only. See the top-level polling, notifications, errors and endpoints for their full contents; they are not duplicated here.";
+    if(auth) {
+        discovery["authentication"]="bearer";
+        discovery["endpoints"][2]["output"]["body"]["authentication"]="bearer";
+        discovery["notifications"]["authentication"]="hello.token";
+        discovery["notifications"]["hello"]["token"]="<device-token>";
+        discovery["notifications"]["resume_hello"]["token"]="<device-token>";
+        discovery["notifications"]["errors"].push_back("unauthorized");
+        discovery["notifications"]["errors"].push_back("forbidden");
+        discovery["authorization"]={{"default","deny"},{"credentials","Authorization: Bearer <token>"},{"browser_login","/login; Secure cookie sessions with X-SPARK-CSRF on mutations"},{"revocation","Checked on each request and before TCP output; in-flight HTTP operations/downloads may finish."}};
+        discovery["errors"].push_back({{"status",401},{"body",{{"error","unauthorized"}}}});
+        discovery["errors"].push_back({{"status",403},{"body",{{"error","forbidden"}}}});
+        for(auto& endpoint:discovery["endpoints"]){
+            if(endpoint.contains("access"))continue;
+            endpoint["input"]["headers"]["Authorization"]="Bearer <token>";
+            bool found=false;
+            for(const auto& rule:route_policies())if(endpoint["method"]==rule.method&&std::regex_replace(endpoint["path"].get<std::string>(),std::regex(R"(\{[^}]+\})"),"{}") == std::regex_replace(rule.path,std::regex(R"(\{[^}]+\})"),"{}")){endpoint["permissions"]=rule.permissions;found=true;break;}
+            // The subscription path uses a descriptive parameter name in discovery.
+            if(!found && endpoint["path"]=="/pulse/subscriptions/{device_id}"){endpoint["permissions"]={"pulse.write"};found=true;}
+            if(!found)throw std::runtime_error("Endpoint is missing an authorization policy");
+        }
+    }
     endpoints[2].body = discovery;
 
     endpoints.push_back({"/api/docs", "Human-readable API reference", nullptr, json::object()});
@@ -109,7 +133,14 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     server.set_write_timeout(5, 0);
     server.set_payload_max_length(std::numeric_limits<std::size_t>::max());
     server.set_default_headers({{"Cache-Control", "no-store"}, {"Access-Control-Allow-Origin", "*"}, {"Access-Control-Expose-Headers", "ETag, Content-Range"}});
-    server.set_pre_routing_handler([endpoints](const auto& request, auto& response) {
+    if(auth)server.set_default_headers({{"Cache-Control","no-store"}});
+    server.set_pre_routing_handler([endpoints,auth](const auto& request, auto& response) {
+        if(auth&&!browser_public_route(request)&&!auth->request(request,response)){
+            if(response.status==401&&(request.method=="GET"||request.method=="HEAD")&&!request.has_header("Authorization")&&request.get_header_value("Accept").find("text/html")!=std::string::npos && (request.path=="/"||request.path=="/api/docs"||request.path=="/files/explorer"||request.path=="/projects/explorer"||request.path=="/commands/explorer")){
+                response.body.clear();response.set_redirect("/login?next="+request.path,303);
+            }
+            return httplib::Server::HandlerResponse::Handled;
+        }
         const bool upload=request.method=="POST" && request.path=="/files";
         const bool text_edit=request.method=="PUT" && std::regex_match(request.path,std::regex(R"(/files/[^/]+/content)"));
         auto reject=[&](int status,const char* error){response.status=status;response.set_header("Connection","close");reply(response,{{"error",error}});return httplib::Server::HandlerResponse::Handled;};
@@ -210,16 +241,18 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     server.Get("/api/docs", [](const auto&, auto& response) {
         response.set_content(std::string(api_docs_html), "text/html; charset=utf-8");
     });
-    configure_dashboard(server, maintenance ? maintenance : std::make_shared<Maintenance>());
-    configure_commands(server, std::make_shared<CommandStore>(DatabaseConfig::from_environment()));
-    configure_devices(server, std::move(registry));
-    configure_timers(server, std::move(timers));
-    configure_pulse(server, std::move(pulse));
-    configure_calendar(server, std::move(calendar));
-    configure_daily_tasks(server, std::move(tasks));
-    configure_boards(server, std::make_shared<BoardStore>(DatabaseConfig::from_environment()), files);
-    configure_projects(server, std::make_shared<ProjectStore>(DatabaseConfig::from_environment()), files);
-    configure_files(server, std::move(files));
+    configure_browser_auth(server,auth);
+    server.set_post_routing_handler([](const auto&,auto& response){response.set_header("X-Content-Type-Options","nosniff");response.set_header("X-Frame-Options","DENY");response.set_header("Referrer-Policy","no-referrer");response.set_header("Content-Security-Policy","default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'");});
+    configure_dashboard(server, maintenance ? maintenance : std::make_shared<Maintenance>(), auth);
+    configure_commands(server, std::make_shared<CommandStore>(DatabaseConfig::from_environment()), auth);
+    configure_devices(server, std::move(registry), auth);
+    configure_timers(server, std::move(timers), auth);
+    configure_pulse(server, std::move(pulse), auth);
+    configure_calendar(server, std::move(calendar), auth);
+    configure_daily_tasks(server, std::move(tasks), auth);
+    configure_boards(server, std::make_shared<BoardStore>(DatabaseConfig::from_environment()), files, auth);
+    configure_projects(server, std::make_shared<ProjectStore>(DatabaseConfig::from_environment()), files, auth);
+    configure_files(server, std::move(files), auth);
     // Unknown body routes must not fall back to buffering an unbounded request.
     httplib::Server::HandlerWithContentReader unknown=[](const auto&,auto& response,const auto&){response.status=404;response.set_header("Connection","close");reply(response,{{"error","not_found"}});};
     server.Post(".*",unknown);server.Put(".*",unknown);server.Patch(".*",unknown);server.Delete(".*",unknown);

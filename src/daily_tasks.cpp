@@ -17,7 +17,7 @@ DailyTaskScheduler::DailyTaskScheduler(std::shared_ptr<DailyTaskStore> store) {
     });
 }
 DailyTaskScheduler::~DailyTaskScheduler() { {std::lock_guard<std::mutex> lock(mutex_); stopping_=true;} wake_.notify_all(); worker_.join(); }
-void configure_daily_tasks(httplib::Server& server,std::shared_ptr<DailyTaskStore> store) {
+void configure_daily_tasks(httplib::Server& server,std::shared_ptr<DailyTaskStore> store, std::shared_ptr<Authorization> auth) {
     auto handler=[store](const httplib::Request& request,httplib::Response& response){
         auto reply=[&](int status,const json& body){response.status=status;response.set_content(body.dump(2)+"\n","application/json");};
         auto bad=[&](const char* code){reply(400,{{"error",code}});};
@@ -51,9 +51,9 @@ void configure_daily_tasks(httplib::Server& server,std::shared_ptr<DailyTaskStor
             else {auto task=(checking || request.method=="PATCH")?store->update(id,packet,checking):store->get(id);if(task) reply(200,*task);else reply(404,{{"error","task_not_found"}});}
         } catch(const DatabaseError&) {reply(503,{{"error","database_unavailable"}});}
     };
-    server.Get("/daily-tasks",handler);body_route(server,"POST","/daily-tasks",handler);
-    server.Get(R"(/daily-tasks/([^/]+))",handler);body_route(server,"PATCH",R"(/daily-tasks/([^/]+))",handler);body_route(server,"DELETE",R"(/daily-tasks/([^/]+))",handler);
-    body_route(server,"PUT",R"(/daily-tasks/([^/]+)/checked)",handler);
+    server.Get("/daily-tasks",handler);body_route(server,"POST","/daily-tasks",handler,auth);
+    server.Get(R"(/daily-tasks/([^/]+))",handler);body_route(server,"PATCH",R"(/daily-tasks/([^/]+))",handler,auth);body_route(server,"DELETE",R"(/daily-tasks/([^/]+))",handler,auth);
+    body_route(server,"PUT",R"(/daily-tasks/([^/]+)/checked)",handler,auth);
 }
 json daily_task_endpoints() {
     const json task={{"id","12345678-1234-1234-1234-123456789abc"},{"name","Drink water"},{"description",""},{"checked",false},{"checked_at",nullptr},{"day","2026-09-19"},{"created_at","2026-09-19T00:00:00.000000Z"},{"updated_at","2026-09-19T00:00:00.000000Z"}};
@@ -67,7 +67,7 @@ json daily_task_endpoints() {
             {"input",{{"path",create || list?json::object():json{{"id","lowercase UUID"}}},{"query",json::object()},{"headers",write?json{{"Content-Type","application/json"}}:json::object()},
                 {"body",!write?json(nullptr):checking?json{{"checked",true}}:json{{"name","Drink water"},{"description",""}}},
                 {"fields",!write?json::object():checking?json{{"checked","required boolean"},{"source_device","optional device ID or null"}}:json{{"name","nonblank string, max 200 UTF-8 bytes"},{"description","string, max 4000 UTF-8 bytes; default empty on creation"},{"source_device","optional device ID or null"}}},
-                {"validation","Unknown body fields rejected. A source_device uses the existing 1-64 character device ID syntax. No authentication."}}},
+                {"validation","Unknown body fields rejected. A source_device uses the existing 1-64 character device ID syntax. In token mode, supplied source_device must match the caller or require devices.delegate."}}},
             {"output",{{"status",create?201:remove?204:200},{"headers",remove?json{{"Cache-Control","no-store"}}:json{{"Content-Type","application/json"},{"Cache-Control","no-store"}}},
                 {"fields",remove?json::object():list?json{{"day","current GMT+8 day"},{"timezone","+08:00"},{"tasks",fields}}:fields},
                 {"body",remove?json(nullptr):list?json{{"day","2026-09-19"},{"timezone","+08:00"},{"tasks",json::array({task})}}:task}}},

@@ -1,0 +1,22 @@
+# Add these blocks to /etc/caddy/Caddyfile; preserve the existing relay block.
+# Create the webroot before reloading. DNS must point to this VPS for issuance.
+http://spark.dracon.au {
+    handle /.well-known/acme-challenge/* {
+        root * /var/lib/spark-acme
+        file_server
+    }
+    handle {
+        redir https://spark.dracon.au{uri} permanent
+    }
+}
+
+spark.dracon.au {
+    header Strict-Transport-Security "max-age=31536000"
+    reverse_proxy 127.0.0.1:47683 {
+        header_up -Forwarded
+        header_up -X-Forwarded-For
+        header_up -X-Forwarded-Host
+        header_up -X-Forwarded-Proto
+        header_up -X-Real-IP
+    }
+}

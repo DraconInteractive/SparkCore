@@ -1,0 +1,7 @@
+#!/bin/sh
+# Certbot deploy hook: only reload a running proxy after its certificate renews.
+set -eu
+[ "${RENEWED_LINEAGE:-}" = /etc/letsencrypt/live/spark-tcp ] || exit 0
+if systemctl is-active --quiet spark-tcp-proxy.service; then
+    systemctl reload spark-tcp-proxy.service
+fi

@@ -1,4 +1,5 @@
 #pragma once
+#include "authorization.hpp"
 #include "database.hpp"
 #include <httplib.h>
 #include <filesystem>
@@ -64,6 +65,6 @@ private:
     std::once_flag initialized_;
 
 };
-void configure_files(httplib::Server&,std::shared_ptr<FileStorage>);
+void configure_files(httplib::Server&,std::shared_ptr<FileStorage>, std::shared_ptr<Authorization> auth = nullptr);
 nlohmann::json file_endpoints();
 }

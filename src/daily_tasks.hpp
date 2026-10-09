@@ -1,4 +1,5 @@
 #pragma once
+#include "authorization.hpp"
 #include "database.hpp"
 #include <httplib.h>
 #include <memory>
@@ -31,6 +32,6 @@ private:
     bool stopping_ = false;
     std::thread worker_;
 };
-void configure_daily_tasks(httplib::Server& server, std::shared_ptr<DailyTaskStore> store);
+void configure_daily_tasks(httplib::Server& server, std::shared_ptr<DailyTaskStore> store, std::shared_ptr<Authorization> auth = nullptr);
 nlohmann::json daily_task_endpoints();
 }

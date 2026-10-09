@@ -55,6 +55,7 @@ int listener(const NotificationOptions& options, int& port) {
 struct NotificationServer::Impl {
     struct Client {
         int fd;
+        std::optional<Identity> identity;
         bool ready = false, closing = false, initialized = false, pending = false, resume = false, caught_up = false;
         unsigned long long token = 0, cursor = 0, target = 0;
         unsigned deferred_pongs = 0;
@@ -72,6 +73,7 @@ struct NotificationServer::Impl {
         unsigned long long token, cursor, through;
         std::string device_id;
         bool initialize, resume;
+        Identity identity;
     };
     struct Result {
         unsigned long long token, cursor, boundary;
@@ -131,6 +133,7 @@ struct NotificationServer::Impl {
                         } else if(event["type"]=="command.updated") {
                             deliver=event.value("source_device",json(nullptr))==job.device_id || event.value("target_device",json(nullptr))==job.device_id || event.value("executing_device",json(nullptr))==job.device_id;
                         }
+                        deliver = deliver && notification_permitted(job.identity,event);
                         const auto frame = deliver ? event.dump() + "\n" : std::string();
                         if (result.frames.size() + frame.size() > 65536) break;
                         result.frames += frame;
@@ -165,11 +168,15 @@ struct NotificationServer::Impl {
         if (!client.ready) {
             const bool resume = packet.contains("after_sequence");
             if (type != "hello" || !packet.contains("device_id") || !packet["device_id"].is_string() ||
-                !std::regex_match(packet["device_id"].get<std::string>(), std::regex("[A-Za-z0-9_-]{1,64}")) || packet.size() != (resume ? 3 : 2) ||
+                !std::regex_match(packet["device_id"].get<std::string>(), std::regex("[A-Za-z0-9_-]{1,64}")) || packet.size() != (resume ? 3 : 2) + (packet.contains("token") ? 1 : 0) ||
                 (resume && !packet["after_sequence"].is_number_unsigned())) {
                 error(client, "invalid_hello"); return;
             }
+            if(packet.contains("token")&&!packet["token"].is_string()){error(client,"invalid_hello");return;}
+            client.identity=options.identity_provider->authenticate(packet.value("token",std::string{}));
+            if(!client.identity){error(client,"unauthorized");return;}
             client.device_id = packet["device_id"].get<std::string>();
+            if(!permitted(*client.identity,"notifications.read")||!acts_as(*client.identity,client.device_id)){error(client,"forbidden");return;}
             client.resume = resume;
             client.cursor = resume ? packet["after_sequence"].get<unsigned long long>() : 0;
             client.ready = true;
@@ -178,6 +185,18 @@ struct NotificationServer::Impl {
             else if(++client.deferred_pongs > 128)error(client,"unsupported_message");
         } else if (type != "pong" || packet.size() != 1) error(client, "unsupported_message");
         client.received = Clock::now();
+    }
+    json resources(const Client& client) const {
+        json result=json::array();
+        for(const std::string& path:std::vector<std::string>{"/timers", "/pulse", "/events", "/daily-tasks", "/projects", "/files", "/files/drives", "/files/directories", "/devices/"+client.device_id, "/devices/"+client.device_id+"/actions", "/commands?source_device="+client.device_id, "/commands?executing_device="+client.device_id}) {
+            if(client.identity->kind=="open"){result.push_back(path);continue;}
+            auto base=path.substr(0,path.find('?'));
+            for(const auto& rule:route_policies())if(rule.method=="GET"&&std::regex_match(base,rule.pattern)){
+                bool allowed=true;for(const auto& permission:rule.permissions)allowed=allowed&&permitted(*client.identity,permission);
+                if(allowed)result.push_back(path);break;
+            }
+        }
+        return result;
     }
     void serve() {
         std::vector<Client> clients;
@@ -195,6 +214,7 @@ struct NotificationServer::Impl {
                 for (auto& client : clients) close(client.fd);
                 clients.clear();
             }
+            for(auto& client:clients)if(client.identity&&!client.closing&&!options.identity_provider->current(*client.identity))error(client,"unauthorized");
             for (const auto& page : pages) for (auto& client : clients) {
                 if(client.token != page.token || client.closing)continue;
                 client.pending = false;
@@ -202,7 +222,7 @@ struct NotificationServer::Impl {
                     client.initialized = true;client.target = page.boundary;
                     client.output += json{{"type", "welcome"}, {"protocol_version", client.resume ? 2 : 1}, {"device_id", client.device_id},
                         {"resync_required", page.resync}, {"sequence", page.boundary},
-                        {"resources", json::array({"/timers", "/pulse", "/events", "/daily-tasks", "/projects", "/files", "/files/drives", "/files/directories", "/devices/"+client.device_id, "/devices/"+client.device_id+"/actions", "/commands?source_device="+client.device_id, "/commands?executing_device="+client.device_id})},
+                        {"resources", resources(client)},
                         {"heartbeat_interval_seconds", options.heartbeat.count() / 1000},
                         {"idle_timeout_seconds", options.idle_timeout.count() / 1000}}.dump() + "\n";
                     while(client.deferred_pongs){client.output += "{\"type\":\"pong\"}\n";--client.deferred_pongs;}
@@ -221,7 +241,7 @@ struct NotificationServer::Impl {
             for(auto& client : clients)if(client.ready && !client.closing && !client.pending && client.output.size()<65536){
                 std::lock_guard<std::mutex> lock(mutex);
                 if(requests.size()>=max_clients)continue;
-                requests.push_back({client.token,client.cursor,client.resume && client.initialized && !client.caught_up ? client.target : std::numeric_limits<unsigned long long>::max(),client.device_id,!client.initialized,client.resume});
+                requests.push_back({client.token,client.cursor,client.resume && client.initialized && !client.caught_up ? client.target : std::numeric_limits<unsigned long long>::max(),client.device_id,!client.initialized,client.resume,*client.identity});
                 client.pending=true;
             }
             std::vector<pollfd> fds{{socket_fd, POLLIN, 0}};
@@ -253,6 +273,7 @@ struct NotificationServer::Impl {
                         if (client.input.size() > max_frame) error(client, "frame_too_large");
                     }
                 }
+                if(client.identity&&!client.closing&&!options.identity_provider->current(*client.identity))error(client,"unauthorized");
                 if (!dead && !client.output.empty() && (flags & POLLOUT)) {
                     const auto count = send(client.fd, client.output.data(), client.output.size(), MSG_NOSIGNAL);
                     if (count > 0) client.output.erase(0, count);

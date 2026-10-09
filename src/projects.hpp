@@ -1,4 +1,5 @@
 #pragma once
+#include "authorization.hpp"
 #include "files.hpp"
 namespace spark {
 class ProjectStore {
@@ -13,6 +14,6 @@ public:
 private:
     DatabaseConfig config_;
 };
-void configure_projects(httplib::Server&,std::shared_ptr<ProjectStore>,std::shared_ptr<FileStorage>);
+void configure_projects(httplib::Server&,std::shared_ptr<ProjectStore>,std::shared_ptr<FileStorage>, std::shared_ptr<Authorization> auth = nullptr);
 nlohmann::json project_endpoints();
 }

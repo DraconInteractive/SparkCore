@@ -1,9 +1,12 @@
 #pragma once
 #include <httplib.h>
+#include "authorization.hpp"
 namespace spark {
 // JSON routes remain bounded even though the file reader accepts arbitrary sizes.
 inline void body_route(httplib::Server& server, const std::string& method,
-                       const std::string& path, httplib::Server::Handler handler) {
+                       const std::string& path, httplib::Server::Handler handler, std::shared_ptr<Authorization> auth=nullptr) {
+    auto domain=std::move(handler);
+    handler=[domain,auth](const auto& request,auto& response){if(!auth||auth->body(request,response))domain(request,response);};
     httplib::Server::HandlerWithContentReader reader=[handler](const auto& request,auto& response,const httplib::ContentReader& read) {
         auto reject=[&](int status,const char* message){response.status=status;response.set_header("Connection","close");response.set_content(message,"application/json");};
         if(request.is_multipart_form_data()) {reject(415,R"({"error":"unsupported_media_type"})");return;}

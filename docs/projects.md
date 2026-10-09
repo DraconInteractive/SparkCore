@@ -80,7 +80,9 @@ requests and exclude new ones until finished. Long uploads can delay deletion.
 
 Missing projects return `404 project_not_found`; malformed IDs, fields and
 parameters return 400, incorrect content types return 415, and database/storage
-failures return 503. Reads support HEAD; routes support OPTIONS. No authentication.
+failures return 503. Reads support HEAD; open mode also supports OPTIONS. Token mode enforces
+project, board and file permissions, including cascade and shorthand operations;
+see [permissions](identity-permissions.md).
 
 ## Upgrade
 

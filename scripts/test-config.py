@@ -79,11 +79,28 @@ with tempfile.TemporaryDirectory(prefix='spark-config-') as temporary:
     for contents in ['',secret,'[]','{}','{"key":1,"key":2}']:
         creds.write_text(contents)
         check(packet,2)
-    creds.write_text(json.dumps({'placeholder':secret}))
+    creds.write_text(json.dumps({'version':1,'credentials':[]}))
+    creds.chmod(0o600)
+    for origin in ['http://spark.example','https://spark.example/','https://user@spark.example','https://spark.example:443','https://spark.example:65536',False,None]:
+        check({'auth':{**packet['auth'],'browser_origin':origin}},2)
+    check({'auth':{**packet['auth'],'browser_origin':'https://spark.example:8443'}})
+    remote={'server':{'host':'127.0.0.1','tls_notification_port':47685},
+            'auth':{**packet['auth'],'browser_origin':'https://spark.example'}}
+    result=check(remote,extra=['--remote'])
+    assert result['remote'] and result['public_notifications']['transport']=='tcp+tls'
+    assert result['public_notifications']['host']=='spark.example'
+    check(remote,2,extra=['--remote','--host','0.0.0.0'])
+    check({},2,extra=['--remote'])
+    check(packet,2,extra=['--remote'])
+    for host in ['0.0.0.0','::','localhost','192.168.4.20']:
+        check({**remote,'server':{**remote['server'],'host':host}},2)
+    for port in [443,47683,47684,0,True]:
+        check({**remote,'server':{**remote['server'],'tls_notification_port':port}},2)
+    check({'server':remote['server']},2)
+    check({**remote,'auth':packet['auth']},2)
     summary=check(packet)
-    assert summary['auth_mode']=='required' and not summary['runtime_supported']
-    assert summary['startup_blockers']==['authentication_enforcement_not_implemented']
-    assert 'enforcement is not implemented' in run(['--config',str(config)],2).stderr
+    assert summary['auth_mode']=='required' and summary['runtime_supported']
+    assert summary['startup_blockers']==[]
     creds.chmod(0)
     if os.geteuid()!=0: check(packet,2)
     creds.chmod(0o600)

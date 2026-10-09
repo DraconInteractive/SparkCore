@@ -1,9 +1,18 @@
+> For remote access, use [TCP over TLS and public endpoint discovery](remote-deployment.md). The native loopback/LAN listener described below remains plain TCP.
+
 # TCP notifications: protocol version 2
 
 SPARK listens on raw TCP port **47684** (REST: 47683). `--notification-port`
 overrides the port; `--host` controls both listeners. `/api.notifications` describes
-the protocol. Messages are UTF-8 JSON objects terminated by a newline, not HTTP,
-WebSocket or TLS. There is no authentication.
+the protocol. Messages are UTF-8 JSON objects terminated by a newline, not HTTP
+or WebSocket. Remote profiles wrap this protocol in TLS at the proxy; the backend
+listener itself is plaintext. Authentication is optional by instance configuration. In token mode,
+add `"token":"<device-token>"` to every hello, including reconnects. The token must
+match `device_id` (or explicitly delegate), grant `notifications.read`, and grant
+read access to each resource family delivered. Live and replayed events are filtered
+identically; welcome resources are permission-filtered. Revoked/changed credentials
+disconnect active sessions. See [authentication protocol](identity-permissions.md).
+The examples below omit the token for open-mode instances.
 
 Protocol 2 adds opt-in, durable reconnect catch-up. Existing two-field hello
 messages still receive a protocol-1 welcome and use the REST resync flow.

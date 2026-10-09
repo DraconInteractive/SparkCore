@@ -1,4 +1,5 @@
 #pragma once
+#include "authorization.hpp"
 #include "database.hpp"
 #include <httplib.h>
 #include <condition_variable>
@@ -18,11 +19,11 @@ public:
     void verify() const;
     nlohmann::json providers(int limit,int offset) const;
     nlohmann::json actions(const std::string& device, const nlohmann::json& replacement=nullptr) const;
-    nlohmann::json create(const nlohmann::json&) const;
+    nlohmann::json create(const nlohmann::json&,const std::optional<std::string>& administrator=std::nullopt) const;
     nlohmann::json get(const std::string&) const;
     nlohmann::json list(const nlohmann::json&) const;
     nlohmann::json claim(const std::string&,int lease_seconds,const std::optional<std::string>& command_id = std::nullopt) const;
-    nlohmann::json transition(const std::string&,const std::string&,const nlohmann::json&) const;
+    nlohmann::json transition(const std::string&,const std::string&,const nlohmann::json&,const std::optional<std::string>& administrator=std::nullopt) const;
     void expire() const;
 };
 class CommandScheduler {
@@ -34,6 +35,6 @@ public:
     explicit CommandScheduler(std::shared_ptr<CommandStore>);
     ~CommandScheduler();
 };
-void configure_commands(httplib::Server&,std::shared_ptr<CommandStore>);
+void configure_commands(httplib::Server&,std::shared_ptr<CommandStore>, std::shared_ptr<Authorization> auth = nullptr);
 nlohmann::json command_endpoints();
 }

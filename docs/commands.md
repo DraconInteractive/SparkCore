@@ -201,9 +201,10 @@ After reconnect, refresh paginated `/commands?source_device={id}` and
 saved local claims, and claim pending work up to local capacity. A new or previously
 unsupported action can become claimable without replaying a historical event.
 
-The existing no-auth model remains: IDs are self-reported, and anyone with REST
-access can register/claim as a device or read command inputs/results. Claim tokens
-prevent accidental stale completion; they are not a substitute for authentication.
+Open mode retains self-reported IDs. Token mode checks requester/executor identity
+and the separate read, invoke, advertise and execute permissions. Explicit
+`devices.delegate` is required to act as another device. Claims and lease tokens
+remain mandatory in addition to authentication. See [permissions](identity-permissions.md).
 A single queue lock serializes transitions for predictable PoC correctness.
 
 ## Validation

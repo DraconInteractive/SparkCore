@@ -19,7 +19,7 @@ void annotate_project(json& record,const std::shared_ptr<FileStorage>& storage){
     record["drive_online"]=record["drive_id"].is_string()&&storage->drive_online(record["drive_id"].get<std::string>());
     for(auto& child:record["subprojects"])if(child.is_object())annotate_project(child,storage);
 }
-void configure_projects(httplib::Server& server,std::shared_ptr<ProjectStore> store,std::shared_ptr<FileStorage> storage){
+void configure_projects(httplib::Server& server,std::shared_ptr<ProjectStore> store,std::shared_ptr<FileStorage> storage, std::shared_ptr<Authorization> auth){
     auto handler=[store,storage](const httplib::Request& req,httplib::Response& res){
         auto reply=[&](int status,const json& body){res.status=status;res.set_content(body.dump(2)+"\n","application/json");};
         auto error=[&](int status,const char* code){reply(status,{{"error",code}});};
@@ -99,7 +99,7 @@ void configure_projects(httplib::Server& server,std::shared_ptr<ProjectStore> st
     });
     server.Get("/projects/explorer",[](const auto&,auto& response){response.set_content(std::string(project_explorer_html),"text/html; charset=utf-8");});
     server.Get("/projects",handler);server.Get(R"(/projects/([^/]+))",handler);
-    body_route(server,"POST","/projects",handler);body_route(server,"PATCH",R"(/projects/([^/]+))",handler);body_route(server,"DELETE",R"(/projects/([^/]+))",handler);
+    body_route(server,"POST","/projects",handler,auth);body_route(server,"PATCH",R"(/projects/([^/]+))",handler,auth);body_route(server,"DELETE",R"(/projects/([^/]+))",handler,auth);
 }
 json project_endpoints(){
     json record={{"id","12345678-1234-1234-1234-123456789abc"},{"name","SPARK"},{"description","Cross-device intelligence hub"},{"directory","/projects/SPARK"},{"drive_id","0123456789abcdef0123456789abcdef"},{"drive_letter","A"},{"drive_online",true},{"parent_id",nullptr},{"subprojects",json::array()},{"github_url",nullptr},{"created_at","2026-09-22T00:00:00.000000Z"},{"updated_at","2026-09-22T00:00:00.000000Z"}};

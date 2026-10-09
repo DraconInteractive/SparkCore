@@ -98,7 +98,7 @@ CalendarScheduler::CalendarScheduler(std::shared_ptr<CalendarStore> store) {
     });
 }
 CalendarScheduler::~CalendarScheduler() { {std::lock_guard<std::mutex> lock(mutex_); stopping_=true;} wake_.notify_all(); worker_.join(); }
-void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> store) {
+void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> store, std::shared_ptr<Authorization> auth) {
     auto handler = [store](const httplib::Request& request, httplib::Response& response) {
         auto reply = [&](int status, const json& body) { response.status = status; response.set_content(body.dump(2) + "\n", "application/json"); };
         auto bad = [&](const char* code) { reply(400, {{"error", code}}); };
@@ -191,9 +191,9 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
             }
         } catch (const std::invalid_argument& error) { bad(error.what()); } catch (const DatabaseError&) { reply(503, {{"error", "database_unavailable"}}); }
     };
-    body_route(server,"POST","/events", handler); server.Get("/events", handler);
+    body_route(server,"POST","/events",handler,auth); server.Get("/events", handler);
     server.Get("/events/occurrences", handler);
-    server.Get(R"(/events/([^/]+))", handler); body_route(server,"PATCH",R"(/events/([^/]+))", handler); body_route(server,"DELETE",R"(/events/([^/]+))", handler);
+    server.Get(R"(/events/([^/]+))", handler); body_route(server,"PATCH",R"(/events/([^/]+))",handler,auth); body_route(server,"DELETE",R"(/events/([^/]+))",handler,auth);
 }
 json calendar_endpoints() {
     const json event = {{"id", "12345678-1234-1234-1234-123456789abc"}, {"name", "Walk"}, {"description", "Meet at the entrance"},

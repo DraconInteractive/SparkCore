@@ -1,4 +1,5 @@
 #pragma once
+#include "authorization.hpp"
 #include "files.hpp"
 namespace spark {
 class BoardStore {
@@ -11,6 +12,6 @@ public:
 private:
     DatabaseConfig config_;
 };
-void configure_boards(httplib::Server&,std::shared_ptr<BoardStore>,std::shared_ptr<FileStorage>);
+void configure_boards(httplib::Server&,std::shared_ptr<BoardStore>,std::shared_ptr<FileStorage>, std::shared_ptr<Authorization> auth = nullptr);
 nlohmann::json board_endpoints();
 }

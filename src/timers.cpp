@@ -43,7 +43,7 @@ TimerScheduler::~TimerScheduler() {
     wake_.notify_all();
     worker_.join();
 }
-void configure_timers(httplib::Server& server, std::shared_ptr<TimerStore> store) {
+void configure_timers(httplib::Server& server, std::shared_ptr<TimerStore> store, std::shared_ptr<Authorization> auth) {
     auto handler = [store](const httplib::Request& request, httplib::Response& response) {
         const bool create = request.path == "/timers" && request.method == "POST";
         const bool list = request.path == "/timers" && (request.method == "GET" || request.method == "HEAD");
@@ -109,10 +109,10 @@ void configure_timers(httplib::Server& server, std::shared_ptr<TimerStore> store
             reply(response, 503, {{"error", "database_unavailable"}});
         }
     };
-    body_route(server,"POST","/timers", handler);
+    body_route(server,"POST","/timers",handler,auth);
     server.Get("/timers", handler);
     server.Get(R"(/timers/([^/]+))", handler);
-    body_route(server,"POST",R"(/timers/([^/]+)/(confirm|stop))", handler);
+    body_route(server,"POST",R"(/timers/([^/]+)/(confirm|stop))",handler,auth);
 }
 json timer_endpoints() {
     const json timer = {{"id", "12345678-1234-1234-1234-123456789abc"}, {"label", "Tea"},

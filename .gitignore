@@ -4,3 +4,12 @@
 .env.local
 
 /storage/
+
+# Local token store referenced by config/tokens.example.json
+/config/credentials.json
+/config/credentials.json.lock
+/config/credentials.json.tmp.*
+
+# Python tooling caches
+__pycache__/
+*.py[cod]

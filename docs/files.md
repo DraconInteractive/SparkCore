@@ -10,8 +10,9 @@ working directory. Use stable absolute directories when running as a service.
 See [multi-drive setup and placement](configuration.md). Each drive has its own directory tree, including empty folders; each file's `drive_id` identifies its storage
 root without exposing its physical path. Use `drive=B` on uploads or file listings to select a drive letter.
 
-All devices share the same collection, with no authentication or device
-assignments. Filenames are labels, not paths. Repeated names create distinct files
+Files form one shared collection without device assignments. In token mode,
+`files.read`/`files.write` protect metadata, directories and content, and
+`admin.storage` protects drive attachment/detachment. See [permissions](identity-permissions.md). Filenames are labels, not paths. Repeated names create distinct files
 with distinct UUIDs. UTF-8 text can be edited in place through the explorer or the conditional content
 replacement endpoint. `file.created`, `file.updated` and `file.deleted` notify clients about committed
 changes; clients fetch metadata and refresh their file lists.
