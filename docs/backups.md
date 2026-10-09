@@ -1,0 +1,252 @@
+# External-drive backups
+
+A recoverable SPARK backup needs both the MariaDB database and every storage drive.
+File blobs alone do not retain names, logical directories, or project associations.
+The backup command captures all SPARK database tables, including projects, boards,
+devices, timers, events, tasks, subscriptions and notification history, alongside
+file storage. It does not change the live data.
+
+This first version is **manual and offline**: stop every SPARK process using this
+database before starting, but leave MariaDB running. The script holds the same
+exclusive storage lock as SPARK for the entire backup. It refuses to run while
+the server owns that lock, and the server cannot start against that storage until
+the backup releases it. Do not use another application or SQL session to modify
+the database or stored files while backing up. The database dump uses a single
+InnoDB transaction; the storage lock keeps file revisions aligned with it.
+
+## Create a backup
+
+1. Mount the external drive using the OS. The scripts do not mount, format or erase
+   drives. `lsblk -f` can help identify the current mount path.
+2. Load the same `SPARK_DB_*` and `SPARK_FILE_DIR` environment as the server, and
+   stop SPARK. The default file directory is this checkout's `storage/files`.
+   Set `SPARK_FILE_DIR` explicitly if your server uses a different directory.
+   For multiple drives, pass `--file-dir` once per configured root (the script does
+   not read the server JSON configuration):
+
+   ```sh
+   ./scripts/backup.sh --mount /media/demo/backup-drive \
+     --file-dir /srv/spark/files --file-dir /media/demo/data/spark-files
+   ```
+
+   Every registered drive must be included, even if empty. The script checks the
+   database registry and locks all roots before dumping data; an omitted drive or
+   missing `.spark-drive` marker fails the backup. Start the upgraded server once
+   after migration 018 to register legacy storage before taking a new backup.
+3. Run as the same OS user used to run SPARK:
+
+   ```sh
+   ./scripts/backup.sh
+   ```
+
+   The menu offers up to 20 previously successful mount/destination pairs, marked
+   mounted or not mounted, plus **Enter a new location**. Enter the mount path and
+   optionally a destination subdirectory. A remembered path is checked again on
+   every run; it is not assumed to still be mounted. If the mount path changes,
+   choose a new location. Only successful backups are remembered.
+
+   To open the selector even when environment defaults are set, use `--choose`.
+   To bypass the menu, pass `--mount` explicitly. The destination defaults to
+   `<mount>/spark-backups`. To choose another directory:
+
+   ```sh
+   ./scripts/backup.sh --mount "/media/demo/backup-drive" \
+     --destination "/media/demo/backup-drive/SPARK backups"
+   ```
+
+   Environment alternatives are `SPARK_BACKUP_MOUNT` and `SPARK_BACKUP_DIR`.
+   Location history is stored locally in `storage/backup-locations.tsv` (outside
+   the file blobs); `SPARK_BACKUP_HISTORY` can override its path. History contains
+   only paths, never credentials. You can remove that file to forget locations.
+   Noninteractive jobs must pass a mount or set the environment; they do not wait
+   for input unless `--choose` is explicitly requested.
+   `.env.local` is not loaded automatically; use the same environment-loading
+   method as the server. Paths containing spaces must be quoted.
+4. Wait for **Backup complete**, restart SPARK, then safely unmount/eject the drive
+   using the OS before disconnecting it.
+
+Requires Bash, MariaDB client tools (`mariadb` and `mariadb-dump`), GNU tar/coreutils, gzip and
+util-linux (`flock`, `mountpoint`). These tools are available on this antiX host.
+No Python service or new REST endpoint is needed. The normal provisioned SPARK
+account has sufficient read permissions. Credentials are placed in a temporary
+mode-600 client option file, removed on normal exit/error, and are never written
+into the backup or command-line arguments.
+
+The destination must be under the specified mounted directory and on a different
+filesystem from every source storage drive. An unplugged/unmounted drive is an error; the
+script will not silently put the backup on the internal disk. Separate backup
+runs are serialized. Keep the chosen drive mounted for the entire command.
+
+## Format, verification and retention
+
+A completed directory looks like:
+
+```text
+spark-20261006T040000Z-Ab12Cd34/
+  manifest.txt
+  SHA256SUMS
+  database.sql.gz.part-000000
+  files.tar.gz.part-000000
+  files.tar.gz.part-000001
+  ...
+```
+
+Each compressed stream is split into chunks of at most **1 GiB**. This supports
+FAT32's individual-file size limit, including backups containing source files
+larger than 4 GiB. It does not set a maximum total backup size; available drive
+capacity remains the limit. Compression streams directly to the drive, without
+staging a second full copy on the server. Already compressed media may shrink very
+little. Every run is a full backup; no old backups are automatically deleted.
+
+Single-drive backups retain `format=spark-backup-v1` and the layout above.
+Multi-drive backups use `format=spark-backup-v2`: `drives.tsv` lists each persistent
+drive ID and its original path, and each drive has its own
+`drive-<id>.tar.gz.part-000000` stream instead of `files.tar.gz.part-*`. Both formats
+include the `.spark-drive` marker inside each storage archive. The verifier checks
+all expected drive archives and, for v2, their marker identities. Original paths
+are informational; restore roots can be elsewhere.
+
+Files are initially written into `.incomplete-spark-...`. After checksum and
+archive validation, the filesystem is flushed and the directory is renamed to its
+completed name. Errors return nonzero and leave an explicitly incomplete directory
+for diagnosis; it is not a recovery point. Remove incomplete directories manually
+when appropriate. Existing completed backups are never replaced by a new attempt.
+The script deliberately performs no automatic service stop/restart or scheduling.
+
+Verify a completed backup later, including after copying it to another drive:
+
+```sh
+./scripts/verify-backup.sh "/media/demo/backup-drive/spark-backups/spark-..."
+```
+
+Verification checks that every expected part is listed, verifies SHA-256 hashes,
+and checks both compressed streams and the tar structure. Checksums detect damage,
+not malicious replacement. Backups are **not encrypted**; protect the drive as you
+would the server. FAT32 cannot enforce Unix file permissions. Store another copy
+separately if protection from loss of the machine and attached drive is needed.
+
+## Restore into a fresh database and storage directory
+
+Restore only trusted backups that pass verification. Keep SPARK stopped until the
+restored database and file directory are paired and runtime permissions are ready.
+Use a **new database and empty directory**, preserving current data while checking
+recovery. The SQL dump contains table definitions and data, including DROP TABLE
+statements; never import it into a database whose existing contents you need.
+
+Example recovery commands (substitute your backup path and new empty directory):
+
+```sh
+backup_path="/media/demo/backup-drive/spark-backups/spark-..."
+./scripts/verify-backup.sh "$backup_path"
+
+# CREATE DATABASE without IF NOT EXISTS refuses accidental reuse.
+sudo mariadb -e 'CREATE DATABASE spark_restored;'
+# Use pipefail so decompression/import failures are not hidden.
+set -o pipefail
+cat "$backup_path"/database.sql.gz.part-* | gzip -dc | sudo mariadb spark_restored
+
+mkdir /home/demo/spark/storage/restored-files
+cat "$backup_path"/files.tar.gz.part-* | gzip -dc | \
+  tar --extract --sparse --file=- --directory=/home/demo/spark/storage/restored-files \
+      --no-same-owner --no-same-permissions
+chmod 700 /home/demo/spark/storage/restored-files
+```
+
+Grant the SPARK service account access to the restored database. For this host's
+existing `demo` account (replace with your actual service account):
+
+```sql
+GRANT SELECT, INSERT, UPDATE, DELETE ON spark_restored.* TO 'demo'@'localhost';
+```
+
+Run that statement through `sudo mariadb`. The backup does not contain MariaDB
+accounts/passwords/grants, server configuration, binaries, custom database
+triggers, stored routines or scheduled SQL events. SPARK's shipped schema does
+not use those custom database objects. On a replacement machine, install MariaDB
+and the SPARK build dependencies and provision the local account first; the
+existing `setup-db.sh` handles normal local-account provisioning.
+
+Start the matching SPARK version with:
+
+```sh
+export SPARK_DB_NAME=spark_restored
+export SPARK_FILE_DIR=/home/demo/spark/storage/restored-files
+./build/spark_server
+```
+
+Its usual startup recovery handles any unfinished upload/deletion records captured
+from a previous interruption. Check file names/directories and download sample
+files (including edited text), and check project links/boards. Update service
+configuration to those restored paths only after recovery is verified. Keep the
+old data and backup until satisfied. Restoring a point-in-time database can move
+notification history backwards; clients must discard their reconnect cursors and
+perform a full REST resync. Older timer/reminder state may be present as of backup
+time. For upgrades, apply the appropriate later migrations after restoration.
+
+### Restoring multiple drives (v2)
+
+Verify the backup and import `database.sql.gz.part-*` into a fresh database as above.
+For each ID in `drives.tsv`, create an empty directory on the intended storage
+filesystem and extract that drive's stream into it:
+
+```sh
+drive_id="REPLACE_WITH_ID_FROM_drives.tsv"
+restore_root="/media/demo/data/restored-spark-files"
+mkdir "$restore_root"
+cat "$backup_path"/drive-"$drive_id".tar.gz.part-* | gzip -dc | \
+  tar --extract --sparse --file=- --directory="$restore_root" \
+      --no-same-owner --no-same-permissions
+chmod 700 "$restore_root"
+```
+
+Repeat for every ID, retaining each extracted `.spark-drive` marker. Set the new
+database name and every restored root in a JSON configuration's `storage.drives`
+array, then launch with `--config`. Array order need not match the backup. Do not
+merge drive archives into one root. For a complete restore, supply every archived drive, including ones that were
+detached when the backup was made; reattach those through the drives API. Test downloads from every drive before switching production to the restore.
+
+## Automated validation
+
+`./scripts/test-local-db.sh` now also exercises backup creation and restore using
+its private MariaDB instance and a temporary `/dev/shm` destination. It checks
+mount/storage-lock rejection, new and remembered location selection, paths with
+spaces, multi-chunk reassembly, corruption/missing chunks, failed-dump handling,
+and restored metadata/downloads through the actual server API. It does not write
+to the user's external drive or production database. Multi-drive tests also cover
+legacy migration, placement, edits, project deletion across drives, missing/live
+replacement roots, reordered roots, relocated restores and omitted backup drives.
+
+## Dashboard backups
+
+Open `/` and choose **Back up storage**. Select a previous successful location or
+enter an absolute mount path and optional destination directory. The drive must
+already be mounted and writable by the server's OS account.
+
+SPARK returns HTTP 202, drains HTTP requests, stops its TCP notification service
+and schedulers, releases the storage lock, runs `scripts/backup.sh`, and starts
+its services again even if the backup fails. REST and TCP are unavailable during
+this interval. Leave the page open: it reconnects automatically and displays the
+result. The latest result is held in memory; completed archives and successful
+location history persist on disk. No other process should write to the database
+or storage during backup. Configuration and database credentials come from the
+running server environment. Every registered storage root (including runtime additions) is passed to the backup
+script; dashboard backups include all drives automatically.
+
+The dashboard also offers **Restart server**, which recreates the service objects
+and connections within the running process. To deploy a newly built binary, stop
+and launch the server as usual. Maintenance operations are serialized: a second
+request receives HTTP 409 while one is queued. POST `/admin/restart` accepts `{}`;
+POST `/admin/backup` accepts `{"mount":"/media/demo/drive","destination":"/media/demo/drive/spark-backups"}`
+(the destination is optional). Both require `Content-Type: application/json` and
+`X-SPARK-Admin: dashboard`. GET `/admin/status` exposes `state` (`idle`, `queued`,
+`succeeded`, `failed`), `version`, and a result `message` when available;
+GET `/admin/backup-locations` returns a `locations` array of mount/destination pairs.
+
+These controls use the existing unauthenticated trust model: anyone able to reach
+SPARK can invoke them. Cross-site browser mutation requests are rejected. Backup
+scripts must remain at the source path used when building the server.
+
+Runtime detachment does not remove a drive from full backups. Reconnect every
+registered drive at its recorded path, or attach it at its new path, before backup.
+An offline/missing drive fails the backup rather than silently creating a partial
+recovery point. The database dump preserves drive letters and attachment state.

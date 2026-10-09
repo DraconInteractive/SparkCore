@@ -14,6 +14,7 @@ before each occurrence. Events do not have a duration.
 | `DELETE /events/{id}` | Delete; 204 with no body |
 | `GET /events/{id}` | Retrieve one record; 200 |
 | `GET /events` | Filtered, paginated collection; 200 |
+| `GET /events/occurrences` | Expanded instances in required from/to range; 200 |
 
 Missing UUIDs return `404 {"error":"event_not_found"}`. Malformed IDs/input/filter
 values return 400, wrong JSON content types return 415, and database failures return
@@ -180,3 +181,58 @@ large deployments will need indexed scheduling.
 
 Upgrade: stop SPARK, run `./scripts/setup-db.sh` to apply the additive, repeatable
 `008_calendar_recurrence.sql` migration, then restart `./build/spark_server`.
+
+## Expanded occurrences (API 1.15.0)
+
+`GET /events/occurrences` returns concrete instances of both one-off and recurring
+series. Both `from` (inclusive) and `to` (exclusive) are required explicit-zone
+ISO 8601 timestamps, and `from` must precede `to`. For a Perth day:
+
+```sh
+curl --get http://192.168.4.20:47683/events/occurrences \
+  --data-urlencode 'from=2030-01-02T00:00:00+08:00' \
+  --data-urlencode 'to=2030-01-03T00:00:00+08:00'
+```
+
+The response shape is:
+
+```json
+{
+  "occurrences": [
+    {
+      "event_id": "12345678-1234-1234-1234-123456789abc",
+      "occurrence_at": "2030-01-02T01:00:00Z",
+      "event": {
+        "id": "12345678-1234-1234-1234-123456789abc",
+        "name": "Exercise",
+        "occurs_at": "2030-01-01T01:00:00Z"
+      }
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "has_more": false
+}
+```
+
+`event` above is abbreviated; actual responses include the full parent record,
+including description, place, recurrence, reminder settings and timestamps.
+`occurrence_at` is the actual instance time in UTC; `event.occurs_at` remains the
+original anchor. The pair `(event_id, occurrence_at)` identifies an instance and
+matches the parent ID and occurrence time in a TCP reminder. Instances are
+computed, not separate editable database records; modifications still use
+`/events/{id}` and affect the series.
+
+Optional `name`, `place`, `limit` and `offset` work as on `/events`; `day` is not
+accepted here. Unknown/repeated filters are rejected. Results sort globally by
+`occurrence_at`, then `event_id`. Pagination counts instances, so a series can
+appear multiple times. Follow `has_more` using the same filters and increment
+`offset` by `limit`; concurrent edits can change pages. Empty ranges of matches
+return an empty array. Missing bounds return `400 missing_range`; reversed or
+equal bounds return `400 invalid_range`.
+
+This read-only endpoint supports HEAD and OPTIONS and never fires reminders.
+It uses the existing recurrence rules, including Perth weekdays, alternate weeks,
+inclusive recurrence end dates, and the anchor lower bound. `/events` and
+`/events/{id}` retain their existing series semantics. No migration is required
+for this endpoint: rebuild and restart SPARK. It also appears in `/api/docs`.

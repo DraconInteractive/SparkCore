@@ -134,6 +134,31 @@ int main() {
         check(expect(client.Get("/events?day=2030-01-15&name=Fortnightly"),200)["events"].size()==1,"next fortnight");
         check(expect(client.Get("/events?day=2030-02-26&name=Fortnightly"),200)["events"].empty(),"end bound");
         check(spark::calendar_occurrence(series,spark::calendar_instant("2030-01-02T01:00:01Z"))==spark::calendar_instant("2030-01-15T01:00:00Z"),"strict next occurrence");
+        const std::string occurrence_path="/events/occurrences?from=2030-01-01T01:00:00Z&to=2030-02-17T00:00:00Z&name=Fortnightly";
+        auto instances=expect(client.Get(occurrence_path),200);
+        check(instances["occurrences"].size()==8 && instances["has_more"]==false,"expand alternate Tuesdays and Wednesdays through inclusive end date");
+        check(instances["occurrences"][1]["occurrence_at"]=="2030-01-02T01:00:00Z" && instances["occurrences"][2]["occurrence_at"]=="2030-01-15T01:00:00Z","occurrence order and off-week exclusion");
+        for(const auto& instance:instances["occurrences"]) check(instance["event_id"]==series["id"] && instance["event"]==series,"parent record and anchor preserved");
+        auto occurrence_page=expect(client.Get(occurrence_path+"&limit=2&offset=2"),200);
+        check(occurrence_page["has_more"]==true && occurrence_page["occurrences"][0]==instances["occurrences"][2],"pagination counts occurrences");
+        check(expect(client.Get(occurrence_path+"&offset=8"),200)["occurrences"].empty(),"offset beyond occurrences");
+        check(expect(client.Get(occurrence_path+"&limit=2&offset=6"),200)["has_more"]==false,"exact final page");
+        auto single=recurring; single["recurrence"]=nullptr; single["occurs_at"]="2030-01-02T01:00:00Z";
+        auto single_record=create(single);
+        auto mixed=expect(client.Get("/events/occurrences?from=2030-01-02T09:00:00%2B08:00&to=2030-01-15T01:00:00Z&name=Fortnightly&place=Park"),200)["occurrences"];
+        check(mixed.size()==2 && mixed[0]["event_id"].get<std::string>()<mixed[1]["event_id"].get<std::string>(),"one-off and recurring merge, offset normalization, inclusive lower/exclusive upper and ID tie-break");
+        expect(client.Delete("/events/"+single_record["id"].get<std::string>()),204);
+        check(expect(client.Get(occurrence_path+"&place=park"),200)["occurrences"].empty(),"case-sensitive occurrence place filter");
+        expect(client.Get("/events/occurrences"),400,"missing_range");
+        expect(client.Get("/events/occurrences?from=2030-01-01T00:00:00Z"),400,"missing_range");
+        expect(client.Get("/events/occurrences?from=2030-01-01T00:00:00Z&to=2030-01-01T00:00:00Z"),400,"invalid_range");
+        expect(client.Get(occurrence_path+"&from=2030-01-01T00:00:00Z"),400,"duplicate_filter");
+        expect(client.Get(occurrence_path+"&day=2030-01-01"),400,"unknown_filter");
+        expect(client.Get(occurrence_path+"&limit=501"),400,"invalid_pagination");
+        expect(client.Get("/events/occurrences?from=bad&to=2030-01-01T00:00:00Z"),400,"invalid_datetime");
+        check(client.Head(occurrence_path)->status==200,"occurrence HEAD");
+        check(client.Options("/events/occurrences")->get_header_value("Allow")=="GET, HEAD, OPTIONS","occurrence OPTIONS");
+        expect(client.Delete("/events/occurrences"),405,"method_not_allowed");
         auto boundary=series;
         boundary["occurs_at"]="2028-02-27T16:30:00Z";
         boundary["recurrence"]={{"weekdays",json::array({2})},{"interval_weeks",1},{"start_date","2028-02-28"},{"end_date","2028-02-29"}};
@@ -171,7 +196,30 @@ int main() {
         auto zero_event=create(zero);
         { spark::CalendarScheduler scheduler(store); const auto frame=peer.until("calendar.reminder");
           check(frame["resource"]=="/events/"+zero_event["id"].get<std::string>() && frame["occurrence_at"]==zero_event["occurs_at"],"scheduler TCP reminder including zero-minute grace"); }
-        auto stale=zero; stale["occurs_at"]=spark::calendar_timestamp(std::time(nullptr)-120);
+        auto recurring_reminder=zero;
+        const auto next_time=std::time(nullptr)+120;
+        recurring_reminder["name"]="Recurring TCP reminder";
+        recurring_reminder["occurs_at"]=spark::calendar_timestamp(next_time);
+        recurring_reminder["reminder_minutes"]=5;
+        const auto perth=next_time+28800;std::tm local{};gmtime_r(&perth,&local);
+        recurring_reminder["recurrence"]={{"weekdays",json::array({(local.tm_wday+6)%7+1})},{"start_date",spark::calendar_timestamp(perth).substr(0,10)}};
+        const auto recurring_due=create(recurring_reminder);
+        { spark::CalendarScheduler scheduler(store);const auto frame=peer.until("calendar.reminder");
+          check(frame["resource"]=="/events/"+recurring_due["id"].get<std::string>() && frame["occurrence_at"]==recurring_due["occurs_at"],"recurring advance reminder delivered over TCP"); }
+        // The observer and scheduler must already be running before creation.
+        // Previous TCP checks only exercised reminders due on the first sweep.
+        {
+            spark::CalendarScheduler scheduler(store);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+            auto future=zero;future["name"]="Created after scheduler startup";
+            future["occurs_at"]=spark::calendar_timestamp(std::time(nullptr)+3);
+            const auto future_event=create(future);
+            check(future_event["last_reminder_occurs_at"].is_null(),"future reminder initially unmarked");
+            const auto frame=peer.until("calendar.reminder");
+            check(frame["resource"]=="/events/"+future_event["id"].get<std::string>() && frame["occurrence_at"]==future_event["occurs_at"],"running scheduler discovers new future events");
+            check(store->get(future_event["id"])->at("last_reminder_occurs_at")==future_event["occurs_at"],"future reminder marker committed");
+        }
+        auto stale=zero; stale["occurs_at"]=spark::calendar_timestamp(std::time(nullptr)-7200);
         auto stale_event=create(stale); store->tick();
         check(store->get(stale_event["id"])->at("last_reminder_occurs_at").is_null(),"skip stale reminders");
 

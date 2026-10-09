@@ -1,4 +1,13 @@
+#include <queue>
+#include <unordered_map>
+#include <functional>
 #include "database.hpp"
+#include "commands.hpp"
+#include <sys/random.h>
+#include <cerrno>
+#include <algorithm>
+#include "projects.hpp"
+#include "boards.hpp"
 #include "timers.hpp"
 #include "notifications.hpp"
 #include "pulse.hpp"
@@ -83,6 +92,7 @@ struct Statement {
         }
         return true;
     }
+    bool changed() const { return mysql_stmt_affected_rows(handle.get()) > 0; }
     json rows() {
         std::array<char, 8192> buffer{};
         unsigned long length = 0;
@@ -137,11 +147,13 @@ std::optional<std::string> external(const json& device) {
     if (device["external_ip"].is_null()) return std::nullopt;
     return device["external_ip"].get<std::string>();
 }
-void event(Connection& connection, const char* action, const json& device) {
+void append_event(Connection&, const std::string&, const std::string&, const json&, const json&);
+void event(Connection& connection, const char* action, const json& device, bool notify=true) {
     Statement statement(connection,
         "INSERT INTO device_events (device_id, action, local_ip, external_ip) VALUES (?, ?, ?, ?)",
         {device["id"].get<std::string>(), std::string(action), device["local_ip"].get<std::string>(), external(device)});
     statement.execute();
+    if(notify)append_event(connection,std::string("device.")+action,"/devices/"+device["id"].get<std::string>(),nullptr,json::object());
 }
 std::optional<json> lock_device(Connection& connection, const std::string& id) {
     Statement statement(connection, "SELECT local_ip, external_ip FROM devices WHERE id = ? FOR UPDATE", {id});
@@ -203,12 +215,13 @@ std::optional<json> DeviceStore::patch(const std::string& id, const json& fields
     Transaction transaction(connection);
     auto device = lock_device(connection, id);
     if (!device) return std::nullopt;
+    const auto previous=*device;
     for (const auto* field : {"local_ip", "external_ip"})
         if (fields.contains(field)) (*device)[field] = fields[field];
     Statement update(connection, "UPDATE devices SET local_ip = ?, external_ip = ?, updated_at = CURRENT_TIMESTAMP(6) WHERE id = ?",
         {(*device)["local_ip"].get<std::string>(), external(*device), id});
     update.execute();
-    event(connection, "updated", *device);
+    event(connection, "updated", *device,previous!=*device);
     transaction.commit();
     return device;
 }
@@ -371,11 +384,11 @@ unsigned long long NotificationStore::latest() const {
     query.execute();
     return std::stoull(query.rows()[0].get<std::string>());
 }
-json NotificationStore::after(unsigned long long sequence) const {
+json NotificationStore::after(unsigned long long sequence, unsigned long long through) const {
     Connection connection(config_);
     Statement query(connection,
-        "SELECT JSON_MERGE_PATCH(JSON_OBJECT('sequence',n.sequence,'event_id',e.event_id,'type',e.type,'resource',e.resource,'source_device',e.source_device), IF(e.type='calendar.reminder',e.payload,JSON_OBJECT())) "
-        "FROM notification_log n JOIN events e ON e.event_id=n.event_id WHERE n.sequence>? ORDER BY n.sequence LIMIT 256", {std::to_string(sequence)});
+        "SELECT JSON_MERGE_PATCH(JSON_OBJECT('sequence',n.sequence,'event_id',e.event_id,'type',e.type,'resource',e.resource,'source_device',e.source_device), IF(e.type='calendar.reminder' OR e.type IN ('command.available','command.updated','files.directories_updated'),e.payload,IF(e.type='device.subscription_updated',JSON_OBJECT('subscribed',JSON_EXTRACT(e.payload,'$.subscribed')),JSON_OBJECT()))) "
+        "FROM notification_log n JOIN events e ON e.event_id=n.event_id WHERE n.sequence>? AND n.sequence<=? ORDER BY n.sequence LIMIT 256", {std::to_string(sequence),std::to_string(through)});
     query.execute();
     return query.rows();
 }
@@ -440,14 +453,17 @@ void PulseStore::tick() const {
 
 namespace spark {
 void PulseStore::subscribe(const std::string& device_id) const {
-    Connection connection(config_);
+    Connection connection(config_);Transaction transaction(connection);
     Statement insert(connection, "INSERT INTO pulse_subscriptions(device_id) VALUES (?)", {device_id});
-    insert.execute(true); // Duplicate subscriptions are successful no-ops.
+    if(insert.execute(true))append_event(connection,"device.subscription_updated","/devices/"+device_id,nullptr,{{"subscribed",true}});
+    transaction.commit();
 }
 void PulseStore::unsubscribe(const std::string& device_id) const {
-    Connection connection(config_);
+    Connection connection(config_);Transaction transaction(connection);
     Statement remove(connection, "DELETE FROM pulse_subscriptions WHERE device_id=?", {device_id});
     remove.execute();
+    if(remove.changed())append_event(connection,"device.subscription_updated","/devices/"+device_id,nullptr,{{"subscribed",false}});
+    transaction.commit();
 }
 std::unordered_set<std::string> NotificationStore::pulse_subscribers() const {
     Connection connection(config_);
@@ -552,7 +568,7 @@ void CalendarStore::tick() const {
         transaction.commit();
     }
 }
-json CalendarStore::list(const json& filters) const {
+json CalendarStore::list(const json& filters, bool expand) const {
     Connection connection(config_);
     std::string sql = "SELECT " + calendar_projection + " FROM calendar_events WHERE 1=1";
     Parameters values;
@@ -570,6 +586,29 @@ json CalendarStore::list(const json& filters) const {
     if(filters.contains("day")) {
         const auto day=calendar_instant(filters["day"].get<std::string>()+"T00:00:00Z");
         lower=std::max(lower,day); upper=std::min(upper,day+86400);
+    }
+    if (expand) {
+        // Merge one occurrence stream per series; never materialize the entire range.
+        struct Entry { std::time_t at; std::size_t index; };
+        auto later = [&candidates](const Entry& a, const Entry& b) {
+            if (a.at != b.at) return a.at > b.at;
+            return candidates[a.index]["id"].get<std::string>() > candidates[b.index]["id"].get<std::string>();
+        };
+        std::priority_queue<Entry, std::vector<Entry>, decltype(later)> pending(later);
+        for (std::size_t i=0; i<candidates.size(); ++i) {
+            const auto at=calendar_occurrence(candidates[i],lower);
+            if (at && *at<upper) pending.push({*at,i});
+        }
+        int skipped=0;
+        while (!pending.empty() && rows.size()<static_cast<std::size_t>(limit)) {
+            const auto entry=pending.top(); pending.pop();
+            const auto& event=candidates[entry.index];
+            if (skipped<offset) ++skipped;
+            else rows.push_back({{"event_id",event["id"]},{"occurrence_at",calendar_timestamp(entry.at)},{"event",event}});
+            const auto next=calendar_occurrence(event,entry.at+1);
+            if (next && *next<upper) pending.push({*next,entry.index});
+        }
+        return {{"occurrences",rows},{"limit",limit},{"offset",offset},{"has_more",!pending.empty()}};
     }
     int matched=0;
     for(auto& record:candidates) {
@@ -669,7 +708,7 @@ bool DailyTaskStore::remove(const std::string& id) const {
 
 namespace spark {
 namespace {
-const std::string file_projection = "JSON_OBJECT('id',id,'name',name,'directory',directory,'size_bytes',size_bytes,'content_type','application/octet-stream','download_url',CONCAT('/files/',id,'/content'),'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+const std::string file_projection = "JSON_OBJECT('id',id,'name',name,'directory',directory,'size_bytes',size_bytes,'content_revision',CONVERT(content_revision USING utf8mb4),'drive_id',drive_id,'drive_letter',(SELECT letter FROM storage_drives WHERE storage_drives.id=files.drive_id),'content_type','application/octet-stream','download_url',CONCAT('/files/',id,'/content'),'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
 }
 void FileStore::verify() const {
     Connection c(config_);
@@ -677,58 +716,454 @@ void FileStore::verify() const {
     Statement dirs(c,"SELECT path FROM file_directories LIMIT 0");dirs.execute();
 }
 namespace {
-void ensure_directories(Connection& c,const std::string& directory){
-    Statement root(c,"INSERT IGNORE INTO file_directories(path) VALUES ('/')");root.execute();
+void ensure_directories(Connection& c,const std::string& directory,const std::string& drive){
+    bool changed=false;
+    Statement root(c,"INSERT IGNORE INTO file_directories(drive_id,path) VALUES (?,'/')",{drive});root.execute();changed=root.changed();
     for(std::size_t end=1;end<=directory.size();++end)if(end==directory.size() || directory[end]=='/'){
         if(end==1)continue;
-        Statement q(c,"INSERT IGNORE INTO file_directories(path) VALUES (?)",{directory.substr(0,end)});q.execute();
+        Statement q(c,"INSERT IGNORE INTO file_directories(drive_id,path) VALUES (?,?)",{drive,directory.substr(0,end)});q.execute();changed=changed||q.changed();
     }
+    if(changed)append_event(c,"files.directories_updated","/files/directories",nullptr,{{"drive_id",drive}});
 }
 }
-void FileStore::create_directory(const std::string& directory) const {
-    Connection c(config_);Transaction tx(c);ensure_directories(c,directory);tx.commit();
+std::string FileStore::default_drive(const std::string& directory) const {
+    Connection c(config_);
+    Statement projects(c,"SELECT DISTINCT JSON_QUOTE(drive_id) FROM projects WHERE drive_id IS NOT NULL AND (BINARY directory=BINARY ? OR LEFT(BINARY ?,OCTET_LENGTH(directory)+1)=CONCAT(BINARY directory,'/'))",{directory,directory});projects.execute();auto matches=projects.rows();
+    if(matches.size()>1)throw std::invalid_argument("drive_required");if(matches.size()==1)return matches[0].get<std::string>();
+    Statement q(c,"SELECT JSON_QUOTE(id) FROM storage_drives WHERE persistent=TRUE");q.execute();auto rows=q.rows();return rows.empty()?"":rows[0].get<std::string>();
 }
-json FileStore::directories() const {
-    Connection c(config_);Statement q(c,"SELECT JSON_QUOTE(CONVERT(path USING utf8mb4)) FROM file_directories ORDER BY path");q.execute();return {{"directories",q.rows()}};
+void FileStore::create_directory(const std::string& directory,const std::optional<std::string>& drive) const {
+    const auto selected=drive?*drive:default_drive(directory);
+    Connection c(config_);Transaction tx(c);ensure_directories(c,directory,selected);tx.commit();
+}
+json FileStore::directories(const std::optional<std::string>& drive) const {
+    const auto selected=drive?*drive:default_drive();
+    Connection c(config_);Statement q(c,"SELECT JSON_QUOTE(CONVERT(path USING utf8mb4)) FROM file_directories WHERE drive_id=? ORDER BY path",{selected});q.execute();return {{"drive_id",selected},{"directories",q.rows()}};
 }
 std::optional<json> FileStore::move(const std::string& id,const std::string& directory) const {
     Connection c(config_);Transaction tx(c);
     Statement read(c,"SELECT "+file_projection+" FROM files WHERE id=? AND state='ready' FOR UPDATE",{id});read.execute();auto rows=read.rows();if(rows.empty())return std::nullopt;
     if(rows[0]["directory"]!=directory){
-        ensure_directories(c,directory);
+        ensure_directories(c,directory,rows[0]["drive_id"].is_null()?"":rows[0]["drive_id"].get<std::string>());
         Statement q(c,"UPDATE files SET directory=? WHERE id=?",{directory,id});q.execute();rows[0]["directory"]=directory;
+        append_event(c,"file.updated","/files/"+id,nullptr,json::object());
     }
     tx.commit();return rows[0];
 }
-std::string FileStore::begin(const std::string& name,const std::string& directory) const {
+std::string FileStore::begin(const std::string& name,const std::string& directory,const std::optional<std::string>& drive) const {
     Connection c(config_); Statement uuid(c,"SELECT JSON_QUOTE(UUID())"); uuid.execute(); auto id=uuid.rows()[0].get<std::string>();
-    Transaction tx(c);ensure_directories(c,directory);Statement q(c,"INSERT INTO files(id,name,directory) VALUES (?,?,?)",{id,name,directory}); q.execute();tx.commit(); return id;
+    Transaction tx(c);ensure_directories(c,directory,drive.value_or(""));Statement q(c,"INSERT INTO files(id,name,directory,drive_id) VALUES (?,?,?,?)",{id,name,directory,drive}); q.execute();tx.commit(); return id;
 }
 json FileStore::publish(const std::string& id,std::uint64_t size) const {
     Connection c(config_); Transaction tx(c);
-    Statement q(c,"UPDATE files SET size_bytes=?,state='ready' WHERE id=? AND state='uploading'",{std::to_string(size),id}); q.execute();
+    Statement q(c,"UPDATE files SET size_bytes=?,state='ready' WHERE id=? AND state='uploading'",{std::to_string(size),id}); q.execute();const bool changed=q.changed();
     Statement read(c,"SELECT "+file_projection+" FROM files WHERE id=? AND state='ready'",{id}); read.execute(); auto rows=read.rows();
     if(rows.empty()) throw DatabaseError("File publication failed");
+    if(changed)append_event(c,"file.created","/files/"+id,nullptr,json::object());
     tx.commit(); return rows[0];
+}
+json FileStore::replace(const std::string& id,const std::string& revision,std::uint64_t size) const {
+    Connection c(config_);Transaction tx(c);
+    Statement update(c,"UPDATE files SET content_revision=?,size_bytes=? WHERE id=? AND state='ready'",{revision,std::to_string(size),id});update.execute();const bool changed=update.changed();
+    Statement read(c,"SELECT "+file_projection+" FROM files WHERE id=? AND state='ready'",{id});read.execute();auto rows=read.rows();
+    if(rows.empty())throw DatabaseError("File replacement failed");
+    if(changed)append_event(c,"file.updated","/files/"+id,nullptr,json::object());
+    tx.commit();return rows[0];
 }
 std::optional<json> FileStore::get(const std::string& id) const {
     Connection c(config_); Statement q(c,"SELECT "+file_projection+" FROM files WHERE id=? AND state='ready'",{id});q.execute();auto rows=q.rows();
     return rows.empty()?std::nullopt:std::optional<json>(rows[0]);
 }
-json FileStore::list(int limit,int offset,const std::optional<std::string>& directory) const {
-    Connection c(config_); Statement q(c,"SELECT "+file_projection+" FROM files WHERE state='ready'"+(directory?" AND BINARY directory=BINARY ?":"")+" ORDER BY created_at,id LIMIT "+std::to_string(limit+1)+" OFFSET "+std::to_string(offset),directory?Parameters{*directory}:Parameters{});q.execute();auto rows=q.rows();
+json FileStore::list(int limit,int offset,const std::optional<std::string>& directory,const std::optional<std::string>& drive) const {
+    Parameters params;if(directory)params.push_back(*directory);if(drive)params.push_back(*drive);
+    Connection c(config_); Statement q(c,"SELECT "+file_projection+" FROM files WHERE state='ready'"+(directory?" AND BINARY directory=BINARY ?":"")+(drive?" AND drive_id=?":"")+" ORDER BY created_at,id LIMIT "+std::to_string(limit+1)+" OFFSET "+std::to_string(offset),params);q.execute();auto rows=q.rows();
     const bool more=rows.size()>static_cast<std::size_t>(limit);if(more)rows.erase(rows.end()-1);
     return {{"files",rows},{"limit",limit},{"offset",offset},{"has_more",more}};
 }
 bool FileStore::deleting(const std::string& id) const {
     Connection c(config_);Transaction tx(c);Statement q(c,"SELECT JSON_QUOTE(state) FROM files WHERE id=? FOR UPDATE",{id});q.execute();auto rows=q.rows();
     if(rows.empty() || rows[0]=="uploading")return false;
-    Statement update(c,"UPDATE files SET state='deleting' WHERE id=?",{id});update.execute();tx.commit();return true;
+    Statement update(c,"UPDATE files SET state='deleting' WHERE id=?",{id});update.execute();
+    if(rows[0]=="ready")append_event(c,"file.deleted","/files/"+id,nullptr,json::object());
+    tx.commit();return true;
 }
 void FileStore::forget(const std::string& id) const {
     Connection c(config_);Statement q(c,"DELETE FROM files WHERE id=? AND state!='ready'",{id});q.execute();
 }
 json FileStore::unfinished() const {
     Connection c(config_);Statement q(c,"SELECT JSON_QUOTE(id) FROM files WHERE state!='ready'");q.execute();return q.rows();
+}
+}
+
+namespace spark {
+namespace {
+const std::string project_projection="JSON_OBJECT('id',id,'name',CONVERT(name USING utf8mb4),'parent_id',parent_id,'description',description,'directory',CONVERT(directory USING utf8mb4),'drive_id',drive_id,'drive_letter',(SELECT letter FROM storage_drives WHERE storage_drives.id=projects.drive_id),'github_url',github_url,'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+json project_children(Connection& c,const std::string& id){
+    Statement q(c,"SELECT JSON_QUOTE(id) FROM projects WHERE parent_id=? ORDER BY name,id",{id});q.execute();return q.rows();
+}
+std::optional<json> read_project(Connection& c,const std::string& id){
+    Statement q(c,"SELECT "+project_projection+" FROM projects WHERE id=? FOR UPDATE",{id});q.execute();auto rows=q.rows();if(rows.empty())return std::nullopt;
+    rows[0]["subprojects"]=project_children(c,id);return rows[0];
+}
+void touch_project(Connection& c,const json& parent){
+    if(parent.is_null())return;
+    Statement q(c,"UPDATE projects SET updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{parent.get<std::string>()});q.execute();
+    if(q.changed())append_event(c,"project.updated","/projects/"+parent.get<std::string>(),nullptr,json::object());
+}
+void project_conflict(Connection& c,const std::string& name,const std::string& directory,const std::string& id,const json& parent,const std::string& drive){
+    Statement q(c,"SELECT JSON_QUOTE(id) FROM projects WHERE drive_id=? AND ((name=? AND parent_id <=> ?) OR directory=?) AND id!=?",{drive,name,parent.is_null()?std::nullopt:std::optional<std::string>(parent.get<std::string>()),directory,id});q.execute();if(!q.rows().empty())throw std::invalid_argument("project_conflict");
+}
+}
+void ProjectStore::verify() const {Connection c(config_);Statement q(c,"SELECT "+project_projection+" FROM projects LIMIT 0");q.execute();}
+json ProjectStore::create(const json& packet) const {
+    Connection c(config_);Transaction tx(c);
+    const auto name=packet["name"].get<std::string>();const auto parent=packet.value("parent_id",json(nullptr));
+    std::string base="/projects",drive=packet.at("drive_id").get<std::string>();
+    if(!parent.is_null()){
+        auto record=read_project(c,parent.get<std::string>());if(!record)throw std::invalid_argument("parent_not_found");base=(*record)["directory"].get<std::string>();if((*record)["drive_id"]!=drive)throw std::invalid_argument("parent_drive_mismatch");
+    }
+    const auto directory=base+"/"+name;
+    if(directory.size()>1024)throw std::invalid_argument("directory_too_long");
+    project_conflict(c,name,directory,"",parent,drive);
+    Statement uuid(c,"SELECT JSON_QUOTE(UUID())");uuid.execute();auto id=uuid.rows()[0].get<std::string>();
+    ensure_directories(c,directory,drive);
+    Statement q(c,"INSERT INTO projects(drive_id,id,name,description,directory,github_url,parent_id) VALUES (?,?,?,?,?,?,?)",{drive,id,name,packet["description"].get<std::string>(),directory,packet.value("github_url",json(nullptr)).is_null()?std::nullopt:std::optional<std::string>(packet["github_url"].get<std::string>()),parent.is_null()?std::nullopt:std::optional<std::string>(parent.get<std::string>())});q.execute();
+    touch_project(c,parent);auto record=read_project(c,id);append_event(c,"project.created","/projects/"+id,nullptr,json::object());tx.commit();return *record;
+}
+std::optional<json> ProjectStore::get(const std::string& id,bool deep) const {
+    Connection c(config_);
+    if(!deep){Transaction tx(c);auto record=read_project(c,id);tx.commit();return record;}
+    // One SELECT supplies a consistent snapshot, with no truncation or per-node queries.
+    Statement q(c,"SELECT "+project_projection+" FROM projects ORDER BY name,id");q.execute();auto rows=q.rows();
+    std::unordered_map<std::string,std::size_t> positions;
+    std::unordered_map<std::string,std::vector<std::string>> children;
+    for(std::size_t i=0;i<rows.size();++i){auto key=rows[i]["id"].get<std::string>();positions[key]=i;if(!rows[i]["parent_id"].is_null())children[rows[i]["parent_id"].get<std::string>()].push_back(key);}
+    if(!positions.count(id))return std::nullopt;
+    std::unordered_map<std::string,bool> visiting;
+    std::function<json(const std::string&)> expand=[&](const std::string& key){
+        if(visiting[key])throw DatabaseError("Project hierarchy cycle");visiting[key]=true;
+        json record=rows[positions.at(key)];record["subprojects"]=json::array();
+        const auto found=children.find(key);if(found!=children.end())for(const auto& child:found->second)record["subprojects"].push_back(expand(child));
+        visiting[key]=false;return record;
+    };
+    return expand(id);
+}
+json ProjectStore::list(int limit,int offset,const std::optional<std::string>& parent) const {
+    Connection c(config_);Transaction tx(c);
+    std::string filter=parent?(parent->empty()?" WHERE parent_id IS NULL":" WHERE parent_id=?"):"";
+    Statement q(c,"SELECT "+project_projection+" FROM projects"+filter+" ORDER BY name,id LIMIT "+std::to_string(limit+1)+" OFFSET "+std::to_string(offset),parent && !parent->empty()?Parameters{*parent}:Parameters{});q.execute();auto rows=q.rows();bool more=rows.size()>static_cast<std::size_t>(limit);if(more)rows.erase(rows.end()-1);
+    for(auto& row:rows)row["subprojects"]=project_children(c,row["id"].get<std::string>());
+    tx.commit();return {{"projects",rows},{"limit",limit},{"offset",offset},{"has_more",more}};
+}
+std::optional<json> ProjectStore::patch(const std::string& id,const json& packet) const {
+    Connection c(config_);Transaction tx(c);auto record=read_project(c,id);if(!record)return std::nullopt;
+    auto updated=*record;for(const auto& field:packet.items())updated[field.key()]=field.value();
+    project_conflict(c,updated["name"],updated["directory"],id,updated["parent_id"],updated["drive_id"]);
+    if(updated!=*record){Statement q(c,"UPDATE projects SET name=?,description=?,github_url=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{updated["name"].get<std::string>(),updated["description"].get<std::string>(),updated["github_url"].is_null()?std::nullopt:std::optional<std::string>(updated["github_url"].get<std::string>()),id});q.execute();append_event(c,"project.updated","/projects/"+id,nullptr,json::object());}
+    record=read_project(c,id);tx.commit();return record;
+}
+std::optional<json> ProjectStore::remove(const std::string& id,bool destroy) const {
+    Connection c(config_);Transaction tx(c);auto record=read_project(c,id);if(!record)return std::nullopt;
+    std::vector<std::string> descendants{id};
+    for(std::size_t i=0;i<descendants.size();++i){
+        auto child=read_project(c,descendants[i]);if(!child)throw DatabaseError("Project hierarchy changed");
+        for(const auto& key:(*child)["subprojects"])descendants.push_back(key.get<std::string>());
+    }
+    json files=json::array();
+    if(destroy){
+        const auto directory=(*record)["directory"].get<std::string>(),prefix=directory+"/";
+        const auto drive=(*record)["drive_id"].get<std::string>();
+        const std::string match="drive_id=? AND (BINARY directory=BINARY ? OR LEFT(BINARY directory,OCTET_LENGTH(?))=BINARY ?)";
+        Statement read(c,"SELECT JSON_OBJECT('id',id,'state',state) FROM files WHERE "+match+" FOR UPDATE",{drive,directory,prefix,prefix});read.execute();
+        for(const auto& file:read.rows()){
+            files.push_back(file["id"]);
+            if(file["state"]=="ready")append_event(c,"file.deleted","/files/"+file["id"].get<std::string>(),nullptr,json::object());
+        }
+        Statement mark(c,"UPDATE files SET state='deleting' WHERE "+match,{drive,directory,prefix,prefix});mark.execute();
+        Statement dirs(c,"DELETE FROM file_directories WHERE drive_id=? AND (path=? OR LEFT(path,OCTET_LENGTH(?))=?)",{drive,directory,prefix,prefix});dirs.execute();
+        if(dirs.changed())append_event(c,"files.directories_updated","/files/directories",nullptr,{{"drive_id",drive}});
+    }
+    for(auto it=descendants.rbegin();it!=descendants.rend();++it){
+        Statement boards(c,"SELECT JSON_QUOTE(id) FROM project_boards WHERE project_id=?",{*it});boards.execute();auto ids=boards.rows();
+        for(const auto& board:ids)append_event(c,"board.deleted","/projects/"+*it+"/boards/"+board.get<std::string>(),nullptr,{{"id",board}});
+        Statement q(c,"DELETE FROM projects WHERE id=?",{*it});q.execute();
+        append_event(c,"project.deleted","/projects/"+*it,nullptr,json::object());
+    }
+    touch_project(c,(*record)["parent_id"]);tx.commit();return files;
+}
+}
+
+namespace spark {
+namespace {
+const std::string board_projection="JSON_OBJECT('id',CONVERT(id USING utf8mb4),'project_id',CONVERT(project_id USING utf8mb4),'name',CONVERT(name USING utf8mb4),'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+const std::string column_projection="JSON_OBJECT('id',CONVERT(id USING utf8mb4),'board_id',CONVERT(board_id USING utf8mb4),'name',CONVERT(name USING utf8mb4),'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+const std::string task_projection="JSON_OBJECT('id',CONVERT(id USING utf8mb4),'board_id',CONVERT(board_id USING utf8mb4),'column_id',CONVERT(column_id USING utf8mb4),'name',name,'description',description,'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+json board_rows(Connection& c,const std::string& sql,Parameters parameters={}){Statement q(c,sql,std::move(parameters));q.execute();return q.rows();}
+json required_board_row(Connection& c,const std::string& sql,Parameters parameters,const char* error){auto rows=board_rows(c,sql,std::move(parameters));if(rows.empty())throw std::invalid_argument(error);return rows[0];}
+json full_board(Connection& c,json board){
+    auto id=board["id"].get<std::string>();
+    board["columns"]=board_rows(c,"SELECT "+column_projection+" FROM project_columns WHERE board_id=? ORDER BY created_at,id",{id});
+    auto tasks=board_rows(c,"SELECT "+task_projection+" FROM project_tasks WHERE board_id=? ORDER BY created_at,id",{id});
+    std::unordered_map<std::string,std::size_t> columns;
+    for(std::size_t i=0;i<board["columns"].size();++i){auto& column=board["columns"][i];columns[column["id"].get<std::string>()]=i;column["tasks"]=json::array();}
+    for(const auto& task:tasks)board["columns"][columns.at(task["column_id"].get<std::string>())]["tasks"].push_back(task);
+    return board;
+}
+void board_conflict(Connection& c,const std::string& table,const std::string& owner_field,const std::string& owner,const std::string& name,const std::string& id){
+    if(!board_rows(c,"SELECT JSON_QUOTE(id) FROM "+table+" WHERE "+owner_field+"=? AND name=? AND id!=?",{owner,name,id}).empty())throw std::invalid_argument("name_conflict");
+}
+}
+void BoardStore::verify() const {
+    Connection c(config_);
+    for(const auto& pair:std::vector<std::pair<std::string,std::string>>{{"project_boards",board_projection},{"project_columns",column_projection},{"project_tasks",task_projection}}){Statement q(c,"SELECT "+pair.second+" FROM "+pair.first+" LIMIT 0");try{q.execute();}catch(const DatabaseError&){throw DatabaseError("Cannot verify "+pair.first+": "+mysql_stmt_error(q.handle.get()));}}
+}
+json BoardStore::execute(const std::string& project,const std::string& board_id,const std::string& kind,const std::string& item_id,const std::string& method,const json& packet) const {
+    Connection c(config_);Transaction tx(c);
+    // All operations lock the project first, then its board. This also coordinates
+    // with project deletion and serializes move/delete races at the database level.
+    required_board_row(c,"SELECT JSON_QUOTE(id) FROM projects WHERE id=? FOR UPDATE",{project},"project_not_found");
+    const bool read=method=="GET" || method=="HEAD",create=method=="POST",remove=method=="DELETE";
+    if(board_id.empty()){
+        if(read){auto rows=board_rows(c,"SELECT "+board_projection+" FROM project_boards WHERE project_id=? ORDER BY created_at,id",{project});tx.commit();return {{"boards",rows}};}
+        board_conflict(c,"project_boards","project_id",project,packet["name"],"");
+        auto id=board_rows(c,"SELECT JSON_QUOTE(UUID())")[0].get<std::string>();
+        Statement q(c,"INSERT INTO project_boards(id,project_id,name) VALUES (?,?,?)",{id,project,packet["name"].get<std::string>()});q.execute();
+        auto record=required_board_row(c,"SELECT "+board_projection+" FROM project_boards WHERE id=?",{id},"board_not_found");record["columns"]=json::array();
+        append_event(c,"board.created","/projects/"+project+"/boards/"+id,nullptr,record);touch_project(c,project);tx.commit();return record;
+    }
+    auto board=required_board_row(c,"SELECT "+board_projection+" FROM project_boards WHERE id=? AND project_id=? FOR UPDATE",{board_id,project},"board_not_found");
+    if(kind=="board" && read){auto record=full_board(c,board);tx.commit();return record;}
+    const auto resource="/projects/"+project+"/boards/"+board_id;
+    if(kind=="board" && remove){
+        Statement q(c,"DELETE FROM project_boards WHERE id=?",{board_id});q.execute();append_event(c,"board.deleted",resource,nullptr,board);touch_project(c,project);tx.commit();return nullptr;
+    }
+    std::string id=item_id;json record;bool changed=create||remove;
+    const std::string table=kind=="column"?"project_columns":kind=="task"?"project_tasks":"project_boards";
+    const std::string projection=kind=="column"?column_projection:kind=="task"?task_projection:board_projection;
+    if(create){
+        if(kind=="task")required_board_row(c,"SELECT JSON_QUOTE(id) FROM project_columns WHERE id=? AND board_id=?",{packet["column_id"].get<std::string>(),board_id},"column_not_found");
+        else board_conflict(c,table,"board_id",board_id,packet["name"],"");
+        id=board_rows(c,"SELECT JSON_QUOTE(UUID())")[0].get<std::string>();
+        if(kind=="task"){Statement q(c,"INSERT INTO project_tasks(id,board_id,column_id,name,description) VALUES (?,?,?,?,?)",{id,board_id,packet["column_id"].get<std::string>(),packet["name"].get<std::string>(),packet["description"].get<std::string>()});q.execute();}
+        else{Statement q(c,"INSERT INTO project_columns(id,board_id,name) VALUES (?,?,?)",{id,board_id,packet["name"].get<std::string>()});q.execute();}
+    }else{
+        if(kind=="board"){record=board;id=board_id;}
+        else record=required_board_row(c,"SELECT "+projection+" FROM "+table+" WHERE id=? AND board_id=?",{id,board_id},kind=="task"?"task_not_found":"column_not_found");
+        if(read){tx.commit();return record;}
+        if(remove){
+            if(kind=="column" && !board_rows(c,"SELECT JSON_QUOTE(id) FROM project_tasks WHERE column_id=? LIMIT 1",{id}).empty())throw std::invalid_argument("column_not_empty");
+            Statement q(c,"DELETE FROM "+table+" WHERE id=?",{id});q.execute();
+        }else{
+            auto desired=record;for(const auto& field:packet.items())desired[field.key()]=field.value();changed=desired!=record;
+            if(kind=="task"){
+                required_board_row(c,"SELECT JSON_QUOTE(id) FROM project_columns WHERE id=? AND board_id=?",{desired["column_id"].get<std::string>(),board_id},"column_not_found");
+                if(changed){Statement q(c,"UPDATE project_tasks SET name=?,description=?,column_id=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{desired["name"].get<std::string>(),desired["description"].get<std::string>(),desired["column_id"].get<std::string>(),id});q.execute();}
+            }else{
+                board_conflict(c,table,kind=="board"?"project_id":"board_id",kind=="board"?project:board_id,desired["name"],id);
+                if(changed){Statement q(c,"UPDATE "+table+" SET name=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{desired["name"].get<std::string>(),id});q.execute();}
+            }
+        }
+    }
+    if(changed){
+        Statement q(c,"UPDATE project_boards SET updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{board_id});q.execute();touch_project(c,project);
+        append_event(c,"board.updated",resource,nullptr,{{"kind",kind},{"id",id},{"action",create?"created":remove?"deleted":"updated"}});
+    }
+    if(!remove){record=required_board_row(c,"SELECT "+projection+" FROM "+table+" WHERE id=?",{id},"board_not_found");if(kind=="board")record=full_board(c,record);}
+    tx.commit();return remove?json(nullptr):record;
+}
+}
+
+namespace spark {
+namespace {
+const std::string command_projection =
+    "JSON_OBJECT('id',id,'source_device',source_device,'target_device',target_device,"
+    "'executing_device',executing_device,'action',action,'input',JSON_EXTRACT(input,'$'),"
+    "'idempotency_key',idempotency_key,'expires_in_seconds',expires_in_seconds,'status',status,"
+    "'result',JSON_EXTRACT(result,'$'),'error',JSON_EXTRACT(error,'$'),"
+    "'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),"
+    "'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'),"
+    "'expires_at',DATE_FORMAT(expires_at,'%Y-%m-%dT%H:%i:%s.%fZ'),"
+    "'lease_expires_at',DATE_FORMAT(lease_expires_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+void queue_lock(Connection& c) {
+    Statement q(c,"SELECT JSON_ARRAY(id) FROM command_queue_lock WHERE id=1 FOR UPDATE");q.execute();
+    if(q.rows().empty())throw DatabaseError("Command queue lock missing; run setup-db.sh");
+}
+json read_command(Connection& c,const std::string& id) {
+    Statement q(c,"SELECT "+command_projection+" FROM commands WHERE id=?",{id});q.execute();auto rows=q.rows();
+    if(rows.empty())throw CommandError(404,"command_not_found");return rows[0];
+}
+void command_event(Connection& c,const char* type,const json& record) {
+    append_event(c,type,"/commands/"+record["id"].get<std::string>(),record["source_device"],
+        {{"action",record["action"]},{"target_device",record["target_device"]},
+         {"executing_device",record["executing_device"]},{"status",record["status"]}});
+}
+void sweep_commands(Connection& c) {
+    Statement q(c,"SELECT JSON_ARRAY(id,status) FROM commands WHERE (status='queued' AND expires_at<=CURRENT_TIMESTAMP(6)) OR (status='running' AND lease_expires_at<=CURRENT_TIMESTAMP(6))");q.execute();
+    for(const auto& row:q.rows()) {
+        std::string id=row[0];std::string state=row[1]=="queued"?"expired":"outcome_unknown";
+        Statement update(c,"UPDATE commands SET status=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{state,id});update.execute();
+        command_event(c,"command.updated",read_command(c,id));
+    }
+}
+void require_device(Connection& c,const std::string& id) {
+    if(!lock_device(c,id))throw CommandError(404,"device_not_found");
+}
+std::string command_token() {
+    unsigned char bytes[32];std::size_t offset=0;
+    while(offset<sizeof(bytes)){auto n=getrandom(bytes+offset,sizeof(bytes)-offset,0);if(n<0&&errno==EINTR)continue;if(n<=0)throw DatabaseError("Cannot generate claim token");offset+=n;}
+    const char* hex="0123456789abcdef";std::string token;for(auto b:bytes){token+=hex[b>>4];token+=hex[b&15];}return token;
+}
+}
+void CommandStore::verify() const {
+    Connection c(config_);Statement q(c,"SELECT "+command_projection+" FROM commands LIMIT 0");q.execute();q.rows();
+    Statement actions(c,"SELECT JSON_ARRAY(device_id,action) FROM device_actions LIMIT 0");actions.execute();actions.rows();
+    Transaction tx(c);queue_lock(c);tx.commit();
+}
+json CommandStore::actions(const std::string& device,const json& replacement) const {
+    Connection c(config_);Transaction tx(c);queue_lock(c);require_device(c,device);
+    Statement query(c,"SELECT JSON_QUOTE(action) FROM device_actions WHERE device_id=? ORDER BY action",{device});query.execute();auto old=query.rows();
+    json current=old;
+    if(!replacement.is_null()) {
+        current=replacement;std::sort(current.begin(),current.end());
+        if(current!=old){
+            Statement remove(c,"DELETE FROM device_actions WHERE device_id=?",{device});remove.execute();
+            for(const auto& action:current){Statement insert(c,"INSERT INTO device_actions(device_id,action) VALUES (?,?)",{device,action.get<std::string>()});insert.execute();}
+            append_event(c,"device.actions_updated","/devices/"+device+"/actions",device,json::object());
+        }
+    }
+    tx.commit();return {{"device_id",device},{"actions",current}};
+}
+json CommandStore::create(const json& p) const {
+    Connection c(config_);Transaction tx(c);queue_lock(c);sweep_commands(c);
+    const auto source=p["source_device"].get<std::string>();const auto target=p.value("target_device",json(nullptr));
+    Statement existing(c,"SELECT JSON_QUOTE(id) FROM commands WHERE source_device=? AND idempotency_key=?",{source,p["idempotency_key"].get<std::string>()});existing.execute();auto ids=existing.rows();
+    if(!ids.empty()) {
+        auto record=read_command(c,ids[0]);
+        if(record["target_device"]!=target || record["action"]!=p["action"] || record["input"]!=p.value("input",json::object()) || record["expires_in_seconds"]!=p.value("expires_in_seconds",300))throw CommandError(409,"idempotency_conflict");
+        tx.commit();return record;
+    }
+    require_device(c,source);if(!target.is_null())require_device(c,target);
+    Statement uuid(c,"SELECT JSON_QUOTE(UUID())");uuid.execute();std::string id=uuid.rows()[0];
+    auto seconds=std::to_string(p.value("expires_in_seconds",300));
+    Statement insert(c,"INSERT INTO commands(id,source_device,target_device,action,input,idempotency_key,expires_in_seconds,expires_at) VALUES (?,?,?,?,?,?,?,TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(6)))",{id,source,nullable_string(target),p["action"].get<std::string>(),p.value("input",json::object()).dump(),p["idempotency_key"].get<std::string>(),seconds,seconds});insert.execute();
+    auto record=read_command(c,id);command_event(c,"command.available",record);command_event(c,"command.updated",record);tx.commit();return record;
+}
+json CommandStore::get(const std::string& id) const {
+    Connection c(config_);Transaction tx(c);queue_lock(c);sweep_commands(c);auto record=read_command(c,id);tx.commit();return record;
+}
+json CommandStore::list(const json& filters) const {
+    Connection c(config_);Transaction tx(c);queue_lock(c);sweep_commands(c);
+    std::string sql="SELECT "+command_projection+" FROM commands WHERE 1=1";Parameters args;
+    for(const auto* field:{"source_device","target_device","executing_device","status"})if(filters.contains(field)){sql+=" AND "+std::string(field)+"=?";args.push_back(filters[field].get<std::string>());}
+    sql+=" ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?";args.push_back(std::to_string(filters.value("limit",100)));args.push_back(std::to_string(filters.value("offset",0)));
+    Statement q(c,sql,args);q.execute();auto records=q.rows();tx.commit();return {{"commands",records},{"limit",filters.value("limit",100)},{"offset",filters.value("offset",0)}};
+}
+json CommandStore::claim(const std::string& device,int lease_seconds,const std::optional<std::string>& command_id) const {
+    Connection c(config_);Transaction tx(c);queue_lock(c);sweep_commands(c);require_device(c,device);
+    std::string selection="SELECT JSON_QUOTE(c.id) FROM commands c JOIN device_actions a ON a.action=c.action AND a.device_id=? WHERE c.status='queued' AND (c.target_device IS NULL OR c.target_device=?)";
+    Parameters parameters{device,device};
+    if(command_id){selection+=" AND c.id=?";parameters.push_back(*command_id);}
+    selection+=" ORDER BY c.created_at,c.id LIMIT 1";
+    Statement q(c,selection,parameters);q.execute();auto ids=q.rows();
+    if(ids.empty()){tx.commit();return {{"command",nullptr}};}
+    std::string id=ids[0];const auto token=command_token();
+    Statement update(c,"UPDATE commands SET status='running',executing_device=?,claim_token=?,lease_expires_at=TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{device,token,std::to_string(lease_seconds),id});update.execute();
+    auto record=read_command(c,id);command_event(c,"command.updated",record);tx.commit();record["claim_token"]=token;return {{"command",record}};
+}
+json CommandStore::transition(const std::string& id,const std::string& operation,const json& p) const {
+    Connection c(config_);Transaction tx(c);queue_lock(c);sweep_commands(c);auto record=read_command(c,id);
+    if(operation=="cancel") {
+        if(record["source_device"]!=p["source_device"])throw CommandError(403,"source_device_mismatch");
+        if(record["status"]=="cancelled"){tx.commit();return record;}
+        if(record["status"]!="queued")throw CommandError(409,"invalid_command_state");
+        Statement update(c,"UPDATE commands SET status='cancelled',updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{id});update.execute();
+    } else {
+        Statement token(c,"SELECT JSON_QUOTE(claim_token) FROM commands WHERE id=?",{id});token.execute();
+        if(record["executing_device"]!=p["device_id"] || token.rows()[0]!=p["claim_token"])throw CommandError(403,"invalid_claim");
+        if(operation=="complete" && (record["status"]=="succeeded" || record["status"]=="failed")) {
+            if(record["status"]!=p["status"] || record["result"]!=p.value("result",json(nullptr)) || record["error"]!=p.value("error",json(nullptr)))throw CommandError(409,"completion_conflict");
+            tx.commit();return record;
+        }
+        if(record["status"]!="running")throw CommandError(409,"invalid_command_state");
+        if(operation=="renew") {
+            Statement update(c,"UPDATE commands SET lease_expires_at=TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{std::to_string(p.value("lease_seconds",60)),id});update.execute();
+        } else {
+            Statement update(c,"UPDATE commands SET status=?,result=?,error=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{p["status"].get<std::string>(),p.value("result",json(nullptr)).dump(),p.value("error",json(nullptr)).dump(),id});update.execute();
+        }
+    }
+    record=read_command(c,id);command_event(c,"command.updated",record);tx.commit();return record;
+}
+void CommandStore::expire() const {
+    Connection c(config_);Transaction tx(c);queue_lock(c);sweep_commands(c);tx.commit();
+}
+std::unordered_set<std::string> NotificationStore::device_actions(const std::string& device) const {
+    Connection c(config_);Statement q(c,"SELECT JSON_QUOTE(action) FROM device_actions WHERE device_id=?",{device});q.execute();std::unordered_set<std::string> result;for(const auto& row:q.rows())result.insert(row.get<std::string>());return result;
+}
+}
+
+namespace spark {
+json CommandStore::providers(int limit,int offset) const {
+    Connection c(config_);
+    Statement q(c,"SELECT JSON_OBJECT('id',d.id,'local_ip',d.local_ip,'external_ip',d.external_ip,'actions',JSON_ARRAYAGG(a.action)) FROM (SELECT id,local_ip,external_ip FROM devices WHERE EXISTS(SELECT 1 FROM device_actions WHERE device_id=devices.id) ORDER BY id LIMIT ? OFFSET ?) d JOIN device_actions a ON a.device_id=d.id GROUP BY d.id,d.local_ip,d.external_ip ORDER BY d.id",{std::to_string(limit),std::to_string(offset)});
+    q.execute();auto devices=q.rows();for(auto& device:devices)std::sort(device["actions"].begin(),device["actions"].end());
+    return {{"devices",devices},{"limit",limit},{"offset",offset}};
+}
+}
+
+namespace spark {
+json FileStore::layout() const {
+    Connection c(config_);Statement q(c,"SELECT JSON_OBJECT('id',id,'directory',directory,'drive_id',drive_id,'state',state,'content_revision',content_revision,'size_bytes',size_bytes) FROM files");q.execute();return q.rows();
+}
+std::optional<std::string> FileStore::location(const std::string& id) const {
+    Connection c(config_);Statement q(c,"SELECT JSON_OBJECT('drive_id',drive_id) FROM files WHERE id=?",{id});q.execute();auto rows=q.rows();
+    return rows.empty()||rows[0]["drive_id"].is_null()?std::nullopt:std::optional<std::string>(rows[0]["drive_id"].get<std::string>());
+}
+void FileStore::register_drives(const std::vector<std::string>& drives,const json& assignments,const json& roots,bool anchor) const {
+    Connection c(config_);Transaction tx(c);
+    Statement lock(c,"SELECT JSON_ARRAY(id) FROM storage_registry_lock WHERE id=1 FOR UPDATE");lock.execute();if(lock.rows().empty())throw DatabaseError("Storage registry lock missing; run setup-db.sh");
+    Statement known(c,"SELECT JSON_QUOTE(id) FROM storage_drives");known.execute();const auto known_rows=known.rows();
+
+    for(const auto& id:drives){Statement q(c,"INSERT IGNORE INTO storage_drives(id) VALUES (?)",{id});q.execute();}
+    Statement numbers(c,"SELECT JSON_ARRAY(COALESCE(MAX(ordinal),0)) FROM storage_drives");numbers.execute();unsigned next=numbers.rows()[0][0].get<unsigned>();
+    std::vector<std::string> ordered=drives;for(const auto& id:known_rows)if(std::find(ordered.begin(),ordered.end(),id.get<std::string>())==ordered.end())ordered.push_back(id);
+    for(const auto& id:ordered){
+        Statement current(c,"SELECT JSON_OBJECT('letter',letter) FROM storage_drives WHERE id=?",{id});current.execute();
+        if(current.rows()[0]["letter"].is_null()){
+            unsigned n=++next;std::string letter;while(n){--n;letter.insert(letter.begin(),char('A'+n%26));n/=26;}
+            Statement q(c,"UPDATE storage_drives SET ordinal=?,letter=? WHERE id=?",{std::to_string(next),letter,id});q.execute();
+        }
+    }
+    bool changed=false;for(const auto& root:roots){Statement q(c,"UPDATE storage_drives SET root_path=?,attached=TRUE WHERE id=?",{root["path"].get<std::string>(),root["id"].get<std::string>()});q.execute();changed=changed||q.changed();}
+    if(changed)append_event(c,"drives.updated","/files/drives",nullptr,json::object());
+    if(anchor&&!drives.empty()){
+        Statement exists(c,"SELECT JSON_ARRAY(COUNT(*)) FROM storage_drives WHERE persistent=TRUE");exists.execute();
+        if(exists.rows()[0][0]==0){Statement q(c,"UPDATE storage_drives SET persistent=TRUE WHERE id=?",{drives[0]});q.execute();}
+    }
+    for(const auto& item:assignments.items()){Statement q(c,"UPDATE files SET drive_id=? WHERE id=? AND drive_id IS NULL",{item.value().get<std::string>(),item.key()});q.execute();}
+    // Finish legacy assignment once the persistent identity exists (also on fresh installs).
+    Statement home(c,"SELECT JSON_QUOTE(id) FROM storage_drives WHERE persistent=TRUE");home.execute();auto homes=home.rows();
+    if(!homes.empty()){
+        const auto drive=homes[0].get<std::string>();
+        Statement copy(c,"INSERT IGNORE INTO file_directories(drive_id,path) SELECT ?,path FROM file_directories WHERE drive_id=''",{drive});copy.execute();
+        Statement clear(c,"DELETE FROM file_directories WHERE drive_id=''");clear.execute();
+        Statement projects(c,"UPDATE projects SET drive_id=? WHERE drive_id IS NULL",{drive});projects.execute();
+    }
+    for(const auto& id:drives)ensure_directories(c,"/",id);
+    for(const auto& item:assignments.items()){
+        Statement read(c,"SELECT JSON_QUOTE(directory) FROM files WHERE id=?",{item.key()});read.execute();auto rows=read.rows();if(!rows.empty())ensure_directories(c,rows[0].get<std::string>(),item.value().get<std::string>());
+    }
+    Statement references(c,"SELECT JSON_OBJECT('drive_id',drive_id) FROM files GROUP BY drive_id");references.execute();
+    for(const auto& row:references.rows())if(row["drive_id"].is_null()||std::find(ordered.begin(),ordered.end(),row["drive_id"].get<std::string>())==ordered.end())throw DatabaseError("File references unavailable storage drive");
+    tx.commit();
+}
+}
+
+namespace spark {
+json FileStore::drives() const {
+    Connection c(config_);Statement q(c,"SELECT JSON_OBJECT('id',id,'letter',letter,'path',root_path,'attached',IF(attached,TRUE,FALSE),'persistent',IF(persistent,TRUE,FALSE)) FROM storage_drives ORDER BY ordinal,id");q.execute();return q.rows();
+}
+void FileStore::detach_drive(const std::string& id) const {
+    Connection c(config_);Transaction tx(c);Statement q(c,"UPDATE storage_drives SET attached=FALSE WHERE id=? AND persistent=FALSE",{id});q.execute();
+    if(q.changed())append_event(c,"drives.updated","/files/drives",nullptr,json::object());tx.commit();
 }
 }

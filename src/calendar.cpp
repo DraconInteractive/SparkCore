@@ -102,7 +102,8 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
     auto handler = [store](const httplib::Request& request, httplib::Response& response) {
         auto reply = [&](int status, const json& body) { response.status = status; response.set_content(body.dump(2) + "\n", "application/json"); };
         auto bad = [&](const char* code) { reply(400, {{"error", code}}); };
-        const bool collection = request.path == "/events";
+        const bool occurrences = request.path == "/events/occurrences";
+        const bool collection = request.path == "/events" || occurrences;
         std::string id;
         if (!collection) {
             id = request.matches[1].str();
@@ -116,7 +117,7 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
                     auto normalized = timestamp(value);
                     if (!normalized) { bad("invalid_datetime"); return; }
                     filters[key] = *normalized;
-                } else if (key == "day") {
+                } else if (key == "day" && !occurrences) {
                     if (!valid_day(value)) { bad("invalid_day"); return; }
                     filters[key] = value;
                 } else if (key == "name" || key == "place") {
@@ -129,6 +130,7 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
                     filters[key] = parsed;
                 } else { bad("unknown_filter"); return; }
             }
+            if (occurrences && (!filters.contains("from") || !filters.contains("to"))) { bad("missing_range"); return; }
             if (filters.contains("from") && filters.contains("to") && filters["from"].get<std::string>() >= filters["to"].get<std::string>()) { bad("invalid_range"); return; }
         }
         if (request.method == "POST" || request.method == "PATCH") {
@@ -182,7 +184,7 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
             } else if (request.method == "DELETE") {
                 if (!store->remove(id)) reply(404, {{"error", "event_not_found"}});
                 else response.status = 204;
-            } else if (collection) reply(200, store->list(filters));
+            } else if (collection) reply(200, store->list(filters, occurrences));
             else {
                 const auto event = request.method == "PATCH" ? store->patch(id, packet) : store->get(id);
                 if (!event) reply(404, {{"error", "event_not_found"}}); else reply(200, *event);
@@ -190,6 +192,7 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
         } catch (const std::invalid_argument& error) { bad(error.what()); } catch (const DatabaseError&) { reply(503, {{"error", "database_unavailable"}}); }
     };
     body_route(server,"POST","/events", handler); server.Get("/events", handler);
+    server.Get("/events/occurrences", handler);
     server.Get(R"(/events/([^/]+))", handler); body_route(server,"PATCH",R"(/events/([^/]+))", handler); body_route(server,"DELETE",R"(/events/([^/]+))", handler);
 }
 json calendar_endpoints() {
@@ -221,6 +224,17 @@ json calendar_endpoints() {
             {"errors", {{"400", "invalid_event_id, invalid_packet, missing_fields, unknown_field, invalid_name, invalid_description, invalid_place, invalid_datetime, invalid_source_device, invalid_recurrence, invalid_reminder_minutes, unknown_filter, duplicate_filter, invalid_filter, invalid_day, invalid_range, invalid_pagination"}, {"404", "event_not_found"}, {"415", "unsupported_media_type"}, {"503", "database_unavailable"}}}
         });
     }
+    endpoints.push_back({
+        {"method","GET"},{"path","/events/occurrences"},
+        {"description","Expand one-off and recurring events into individual occurrences in [from,to), ordered by occurrence_at then event_id. Parent event occurs_at remains the original anchor. Read-only; no reminders are fired by this request."},
+        {"input",{{"path",json::object()},{"headers",json::object()},{"body",nullptr},
+            {"query",{{"from","required inclusive ISO 8601 timestamp with explicit zone"},{"to","required exclusive ISO 8601 timestamp with explicit zone; must be after from"},{"name","optional literal case-sensitive name substring"},{"place","optional exact case-sensitive place"},{"limit","1..500; default 100"},{"offset","0..1000000; default 0"}}},
+            {"validation","Unknown and duplicate filters rejected; day is not supported. Encode + offsets as %2B. Recurrence follows the stored Perth schedule."}}},
+        {"output",{{"status",200},{"headers",{{"Content-Type","application/json"},{"Cache-Control","no-store"}}},
+            {"fields",{{"occurrences","array of {event_id, occurrence_at, event}; event is the full parent record. Identify an instance by (event_id, occurrence_at)."},{"limit","page size"},{"offset","occurrences skipped"},{"has_more","another page exists; increment offset by limit. Concurrent edits may change pagination."}}},
+            {"body",{{"occurrences",json::array({json{{"event_id",event["id"]},{"occurrence_at",event["occurs_at"]},{"event",event}}})},{"limit",100},{"offset",0},{"has_more",false}}}}},
+        {"errors",{{"400","missing_range, invalid_range, invalid_datetime, unknown_filter, duplicate_filter, invalid_filter, invalid_pagination"},{"503","database_unavailable"}}}
+    });
     return endpoints;
 }
 }

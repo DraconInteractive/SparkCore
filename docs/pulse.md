@@ -99,11 +99,11 @@ core acknowledgement endpoint for pulses, unlike timers.
 should not cause an intrusive prompt. Both events are hints to refresh `/pulse`;
 TCP event envelopes do not include the state snapshot.
 
-TCP welcome now lists both `/timers` and `/pulse` for resynchronization. Fetch them
-after reconnecting; do not treat a settings refresh itself as a new pulse. Offline
-notifications are not replayed. Delayed/unsequenced events may arrive after a
-recovery, so clients should check the latest timestamp/count before presenting a
-reminder. See [notifications.md](notifications.md) for framing and heartbeats.
+TCP welcome lists `/timers` and `/pulse` for resynchronization when
+`resync_required` is true. Protocol-2 reconnects can replay offline notifications,
+filtered by the current pulse subscription. Do not treat a settings refresh or
+each historical pulse as a fresh prompt: check the latest timestamp/count before
+presenting a reminder. See [notifications.md](notifications.md) for framing and heartbeats.
 
 ## Timing and reliability
 

@@ -1,0 +1,14 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 47683,
+    "notification_port": 47684
+  },
+  "database": {
+    "host": "localhost",
+    "name": "spark"
+  },
+  "storage": {
+    "drives": ["../storage/files"]
+  }
+}

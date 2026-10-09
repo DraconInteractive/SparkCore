@@ -38,9 +38,9 @@ int main() {
         check(api && api->status == 200, "discovery status");
         auto document = nlohmann::json::parse(api->body);
         check(document["authentication"] == "none", "authentication");
-        check(document["endpoints"].size() == 37, "endpoint count");
+        check(document["endpoints"].size() == 77, "endpoint count");
         for (const auto& endpoint : document["endpoints"]) {
-            if (endpoint["path"].get<std::string>().find("/files") == 0 || endpoint["path"] == "/api/docs" || endpoint["path"].get<std::string>().find("/daily-tasks") == 0 || endpoint["path"].get<std::string>().find("/events") == 0 || endpoint["method"] != "GET" || endpoint["path"] == "/pulse" || endpoint["path"].get<std::string>().find("/timers") == 0 || endpoint["path"] == "/devices/{id}") continue;
+            if (endpoint["path"].get<std::string>().find("/commands") == 0 || endpoint["path"] == "/devices/{id}/actions" || endpoint["path"] == "/" || endpoint["path"].get<std::string>().find("/admin/") == 0 || endpoint["path"] == "/project/{id}/files" || endpoint["path"].get<std::string>().find("/projects") == 0 || endpoint["path"].get<std::string>().find("/files") == 0 || endpoint["path"] == "/api/docs" || endpoint["path"].get<std::string>().find("/daily-tasks") == 0 || endpoint["path"].get<std::string>().find("/events") == 0 || endpoint["method"] != "GET" || endpoint["path"] == "/pulse" || endpoint["path"].get<std::string>().find("/timers") == 0 || endpoint["path"] == "/devices/{id}") continue;
             auto response = client.Get(endpoint["path"].get<std::string>());
             check(response && response->status == endpoint["output"]["status"], "documented status");
             check(response->get_header_value("Content-Type") == "application/json", "JSON content type");

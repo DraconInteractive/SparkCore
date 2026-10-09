@@ -163,11 +163,9 @@ set +a
 ```
 
 The setup script is safe to repeat for this initial schema. Future schema changes
-should be added as numbered SQL migrations. Back up the database tables together:
-
-```sh
-sudo mariadb-dump --single-transaction spark > spark-backup.sql
-```
+should be added as numbered SQL migrations. Back up the database and file bytes
+together using `scripts/backup.sh`; a database-only dump cannot restore uploaded
+files. See [external-drive backups and recovery](docs/backups.md).
 
 `./scripts/test-db.sh` provisions and removes a uniquely named test database. It
 requires sudo MariaDB access and runs the HTTP contract, concurrency, persistence,
@@ -279,8 +277,8 @@ SPARK now starts a TCP notification listener on **47684**, alongside REST on 476
 Clients send a newline-terminated `{"type":"hello","device_id":"watch-1"}`,
 wait for welcome, and refresh `/timers`. Committed timer events then tell every
 connected client which REST resource changed. Reply to server ping messages with
-pong, and refresh REST state after every reconnect. This is an unauthenticated
-raw TCP stream with live delivery; disconnected clients resync instead of replaying
+pong, and refresh REST state when welcome has `resync_required:true`. This is an
+unauthenticated raw TCP stream. Clients can resume using `after_sequence` to replay
 missed events.
 
 The complete client contract, examples, framing rules, heartbeat intervals, and
@@ -342,7 +340,10 @@ See [docs/daily-tasks.md](docs/daily-tasks.md) for examples and reset semantics.
 Apply `./scripts/setup-db.sh` and restart SPARK for the new schema.
 
 Events support weekly/fortnightly recurrence with Perth date bounds and optional
-TCP reminders before each occurrence. See [the event API](docs/events.md).
+TCP reminders before each occurrence. `GET /events/occurrences?from=...&to=...`
+expands schedules into dated instances, ordered by occurrence time, with optional
+name/place filters and pagination. `/events` continues to return series.
+See [the event API](docs/events.md).
 
 ## Browser API reference
 
@@ -367,7 +368,126 @@ Set `SPARK_FILE_DIR` to choose the storage directory (default `storage/files`).
 Stop SPARK, run `./scripts/setup-db.sh`, and restart the rebuilt server to activate.
 See [the file API and recovery behaviour](docs/files.md), or browse `/api/docs`.
 
+The explorer can view and edit UTF-8 text up to 2 MiB, with Save, Reload and
+concurrent-edit protection. Larger logs offer first/last 64 KiB previews.
+`PUT /files/{id}/content` saves text with the current content ETag in `If-Match`.
+Apply `014_file_revisions.sql` through `./scripts/setup-db.sh` before restarting
+the rebuilt server; existing uploads remain compatible.
+
 Browse `/files/explorer` to upload, preview, download, move and delete files, and
 create directories. Files now have a logical `directory` (default `/`); upload and
 list requests accept it, and `PATCH /files/{id}` moves a file. Run
 `./scripts/setup-db.sh` with SPARK stopped, then restart to apply directory support.
+
+## Projects
+
+`POST /projects` creates a named project reference and its `/projects/{name}`
+logical file directory. Projects have descriptions and optional `github_url`
+links. List with `GET /projects`, retrieve or edit with `GET/PATCH /projects/{id}`.
+Renaming preserves the assigned directory. `DELETE /projects/{id}` requires
+`{"destroy_directory":false}` to retain files, or `true` to remove the full tree.
+See [the project API](docs/projects.md). Apply `./scripts/setup-db.sh` with SPARK
+stopped, then restart the rebuilt server.
+
+Open `/projects/explorer` for browser-based project management, with links to each
+project’s files and repository and an explicit file-retention choice on deletion.
+
+Projects support nested subprojects through `parent_id` on creation. Child file
+directories sit beneath their parent's directory. `GET /projects/{id}?depth=shallow`
+(default) returns child IDs; `?depth=deep` embeds the entire descendant tree.
+The project explorer includes New subproject and parent/child navigation.
+Apply `./scripts/setup-db.sh` with SPARK stopped for the hierarchy migration.
+
+Each project can also have multiple named Kanban boards. Manage columns and tasks
+in `/projects/explorer`, or use `/projects/{id}/boards` and the nested board API.
+Tasks move between columns without changing identity; non-empty columns cannot be
+deleted. Changes use TCP `board.created`, `board.updated` and `board.deleted`.
+See [the board API](docs/boards.md). Stop SPARK and run `./scripts/setup-db.sh`
+before restarting the rebuilt server for this migration.
+
+### Notification reconnect catch-up (API 1.22.0)
+
+TCP clients can send `{"type":"hello","device_id":"watch-1","after_sequence":42}`
+to replay missed notifications from the durable log. Save the last successfully
+processed **sequence**, not event ID. `catchup_complete` marks the transition to
+live delivery; checkpoints also advance past subscription-filtered pulses.
+Existing hello messages still request a full REST resync. See the
+[notification protocol](docs/notifications.md) for cursor persistence and recovery.
+No database migration is needed for this addition; rebuild and restart SPARK.
+
+### Consistent change notifications (API 1.23.0)
+
+Files, directories, projects, device registrations and pulse subscriptions now
+emit durable TCP notifications alongside timers, calendars, daily tasks and boards.
+Changes and events commit together, including recursive project deletions. They
+also replay on reconnect. See [the notification coverage table](docs/notifications.md#additional-change-coverage-api-1230)
+for event names and refresh behavior. Rebuild/restart; no new migration.
+
+### External-drive backups
+
+Stop SPARK (leave MariaDB running), mount an external drive, and run:
+
+```sh
+./scripts/backup.sh
+```
+
+Choose a previous successful location or enter the current mount path. For a
+direct command, use `--mount "/path/to/mounted-drive"`. This creates a timestamped,
+compressed backup of the SPARK database and file
+storage, split into 1 GiB chunks for FAT32 support. It checks the storage lock,
+refuses an unmounted destination or the source filesystem, and verifies checksums
+before publishing a completed backup. Restart SPARK after it finishes. Backups
+are retained until explicitly removed; no schedule is installed automatically.
+See [backup verification and restore instructions](docs/backups.md).
+
+### Dashboard
+
+Open `/` for links to the projects explorer, files explorer and API reference.
+The dashboard can restart SPARK's services and run a compressed external-drive
+backup using a previous or new mount path. Backup temporarily takes REST and TCP
+offline; the page reconnects and shows the result when services resume. See
+[dashboard backup details](docs/backups.md#dashboard-backups). Restarting services
+does not load a newly compiled binary; deploy those by relaunching the process.
+
+### Device commands (API 1.25.0)
+
+Devices advertise a small action-name list using `PUT /devices/{id}/actions`.
+Requesters submit `POST /commands` with an optional target: without one, the first
+eligible device to atomically claim the work executes it.
+As of API 1.26.0, claim requests accept an optional `command_id` so clients can
+choose their own execution priority. A specified ID never falls back to other work;
+omitting it retains oldest-eligible selection. The TCP layer delivers
+`command.available` and `command.updated` to the appropriate devices. Claims use
+leases and tokens, and commands retain results and idempotency keys in MariaDB.
+Expired execution leases become `outcome_unknown`; work is never automatically
+reassigned. See [device command protocol](docs/commands.md) and `/api/docs` for
+packets, endpoints and reconnect handling.
+
+Apply the new schema/permissions using `./scripts/setup-db.sh`, then rebuild and
+relaunch SPARK. Client devices must implement their local action handlers.
+
+Open `/commands/explorer` to browse devices exposing actions and run a targeted
+command once with optional JSON inputs. The page tracks execution results and is
+linked from the dashboard. Device discovery is also available as paginated JSON
+at `GET /commands/devices` (API 1.27.0).
+
+### Planned configuration and authentication
+
+The agreed [configuration and authentication plan](docs/authentication-plan.md)
+tracks optional auth, shared REST/TCP identity and permissions, browser sessions,
+and secure remote deployment. Step 1 is implemented: see [instance configuration](docs/configuration.md)
+for `--config`, `--check-config`, precedence and the `storage.drives` array. Auth
+enforcement is pending; configuring auth currently blocks startup. Multiple drives
+are supported with persistent file locations, uploads directed to a chosen drive,
+and backups covering every drive. Apply migration 018 using `./scripts/setup-db.sh`
+before restarting the new binary. An open-mode example is provided in
+[config/open.example.json](config/open.example.json).
+
+Runtime storage management is available at `/files/drives` and in the Files explorer:
+attach mounted directories, detach removable storage, and browse/upload by stable
+drive letters. Offline drives retain their metadata and letters; server storage
+remains persistent. See [configuration](docs/configuration.md).
+
+Directories now belong to drives, including empty folders. Projects select a drive
+at creation; children inherit it. Offline project metadata and boards stay usable,
+while file operations require the selected drive. See [project storage](docs/projects.md).

@@ -4,14 +4,17 @@ SPARK accepts any file type and has no application-level file size limit. Transf
 stream between the network and disk; the server does not buffer the whole file in
 RAM. Disk capacity, filesystem/platform limits, and any proxy in front of SPARK
 remain practical limits. Metadata is stored in MariaDB; bytes are stored under
-`SPARK_FILE_DIR`, default `storage/files` relative to the server's working directory.
-Use a stable absolute directory when running SPARK as a service.
+the directories in the configuration's `storage.drives` array. Without a storage
+configuration, `SPARK_FILE_DIR` still defaults to `storage/files` relative to the
+working directory. Use stable absolute directories when running as a service.
+See [multi-drive setup and placement](configuration.md). Each drive has its own directory tree, including empty folders; each file's `drive_id` identifies its storage
+root without exposing its physical path. Use `drive=B` on uploads or file listings to select a drive letter.
 
 All devices share the same collection, with no authentication or device
 assignments. Filenames are labels, not paths. Repeated names create distinct files
-with distinct UUIDs. File contents are immutable; upload another file to replace content,
-then delete the old ID when appropriate. No TCP notification is emitted for file
-changes; clients list the collection to discover them.
+with distinct UUIDs. UTF-8 text can be edited in place through the explorer or the conditional content
+replacement endpoint. `file.created`, `file.updated` and `file.deleted` notify clients about committed
+changes; clients fetch metadata and refresh their file lists.
 
 ## Endpoints
 
@@ -20,7 +23,8 @@ changes; clients list the collection to discover them.
 | `POST /files?name=example.bin` | Stream an upload; 201 metadata and `Location: /files/{id}` |
 | `GET /files` | List completed uploads with pagination |
 | `GET /files/{id}` | Metadata for one completed upload |
-| `GET /files/{id}/content` | Download original bytes; supports byte ranges |
+| `GET /files/{id}/content` | Download current bytes; supports byte ranges |
+| `PUT /files/{id}/content` | Save UTF-8 text with `If-Match`; 200 metadata and new ETag |
 | `DELETE /files/{id}` | Remove metadata and stored bytes; 204 with no body |
 
 GET endpoints also support HEAD; all routes support OPTIONS. The contracts are
@@ -42,7 +46,7 @@ rejected to avoid transforming the original bytes.
 
 `name` is required, URL encoded, and must contain 1..255 valid UTF-8 bytes. Slashes,
 backslashes, control characters and the names `.` and `..` are rejected. No other
-query parameters beyond `name` and optional `directory`, or duplicate parameters,
+query parameters beyond `name`, optional `directory` and optional `drive`, or duplicate parameters,
 are accepted. The filename is never used as a
 filesystem path. Stored files use generated UUIDs and private filesystem permissions.
 
@@ -52,7 +56,10 @@ Example metadata response:
 {
   "id": "12345678-1234-1234-1234-123456789abc",
   "name": "example.bin",
+  "drive_id": "0123456789abcdef0123456789abcdef",
+  "drive_letter": "A",
   "size_bytes": 1024,
+  "content_revision": "",
   "content_type": "application/octet-stream",
   "download_url": "/files/12345678-1234-1234-1234-123456789abc/content",
   "created_at": "2026-09-19T00:00:00.000000Z"
@@ -85,7 +92,7 @@ collection changes can shift pages; refresh when needed.
 
 Downloads return `application/octet-stream`, `Content-Disposition: attachment`
 with the UTF-8 filename, `X-Content-Type-Options: nosniff`, `Accept-Ranges: bytes`,
-and an ETag derived from the immutable file ID. A valid Range request returns 206;
+and an ETag identifying the file and its current content revision. A valid Range request returns 206;
 an unsatisfiable range returns 416. HEAD returns download headers without bytes.
 Files are delivered as attachments, not rendered as pages within SPARK's origin.
 
@@ -136,8 +143,8 @@ required. The isolated integration suite is `./scripts/test-local-db.sh`.
 Open `/files/explorer` in a browser to browse folders, upload files (including drag
 and drop), view details, download, move or delete files. Uploads show progress and
 can be cancelled. The explorer asks for confirmation before deletion. File names
-open details with previews for common text and image formats. Text previews show
-at most 64 KiB; image previews are limited to 10 MiB. These preview limits do not
+open details with previews for common text and image formats. UTF-8 text up to 2 MiB can be viewed and edited. Larger text files have read-only
+first/last 64 KiB previews; image previews are limited to 10 MiB. These preview limits do not
 limit uploads or downloads. Other formats can be downloaded to open locally.
 HTML and SVG are displayed as text, never executed as pages.
 
@@ -165,9 +172,132 @@ Directory creation and move requests require `Content-Type: application/json`.
 Invalid paths return 400 `invalid_directory`; moving a missing or non-ready file
 returns 404 `file_not_found`. The explorer loads files in pages of 100 and its
 search filters loaded files. Directory paths can be bookmarked in the URL hash.
+The sidebar has a **Show files** checkbox, remembered in this browser. When enabled,
+it lists files under their directories; clicking a filename opens the viewer/editor.
+It follows file-list pagination independently of the main table. Refresh and file
+changes reload the sidebar.
+
 Folders are retained when their last file is moved or deleted. Folder deletion
 and folder renaming are not provided in this release.
 
 Apply `010_file_directories.sql` using `./scripts/setup-db.sh` while SPARK is
 stopped, then restart the rebuilt server. File bytes stay in their existing
 storage location; no physical file migration is required.
+
+## Text viewer/editor (API 1.21.0)
+
+Click a filename in `/files/explorer`, then **Edit text**. **Save changes** updates
+that shared file; its ID, name, directory, creation time and download URL stay
+unchanged. **Reload** fetches the current contents, with confirmation before
+unsaved edits are discarded. Closing the editor or leaving the page also protects
+unsaved edits. Text is displayed safely, including HTML and SVG. Extensionless
+UTF-8 text is supported; binary or invalid UTF-8 content remains download-only.
+
+Editing is limited to complete UTF-8 files of at most **2 MiB**, including any BOM.
+LF and CRLF line endings and UTF-8 BOMs are preserved. Mixed line endings and legacy
+CR-only files are read-only to avoid silently converting their contents. Large
+logs have **First 64 KiB**, **Last 64 KiB** and **Reload** controls. These are snapshots,
+not live tailing, and partial previews cannot be saved. Uploads/downloads remain
+uncapped. This browser accesses SPARK shared files, not arbitrary machine log paths.
+
+`PUT /files/{id}/content` accepts raw text with `Content-Type: text/plain` or
+`text/plain; charset=utf-8`. Send Content-Length or chunked framing and the exact
+quoted **ETag** returned by `GET /files/{id}/content` in **If-Match**. It returns
+200 metadata (including `content_revision`) and a new ETag. Metadata for old uploads
+has an empty revision until first edited. Missing If-Match returns 428, an outdated
+or wildcard tag returns 412 `file_changed`, invalid UTF-8 or control characters
+other than tab/CR/LF return 400 `invalid_text`, and text exceeding 2 MiB returns 413.
+Empty text is allowed. Missing files return 404. A conflicting editor retains its
+unsaved text so the user can copy it before reloading and comparing.
+
+Saves write and sync a new private blob before transactionally switching the
+MariaDB content revision and size together. Existing downloads retain their old
+open descriptor. Failed/uncertain commits retain versions until recovery; startup
+removes versions not referenced by committed metadata. Deletion removes all
+versions. A committed save emits `file.updated`. If a save loses its response, reload to determine
+whether it committed before trying again.
+
+Stop SPARK, apply `014_file_revisions.sql` with `./scripts/setup-db.sh`, and restart
+the rebuilt server. The migration is additive and existing blobs stay compatible.
+
+## Change notifications (API 1.23.0)
+
+Completed uploads emit `file.created`; text saves and directory moves emit
+`file.updated`; logical deletion emits `file.deleted`. Their `resource` is
+`/files/{id}`. All have null `source_device` and reach all TCP clients, including
+through reconnect catch-up. Contents never appear in notifications. Fetch metadata
+and refresh affected lists; if you do not know a file's previous directory, refresh
+all cached directory listings. Content changes require reloading an open preview;
+do not overwrite unsaved editor text. Existing ETag conflict checks still apply.
+
+`files.directories_updated` uses `/files/directories` and covers explicit folder
+creation, automatically created parents, and recursive project-directory removal.
+Repeated mkdir or unchanged moves produce no new event. A text save creates a new
+revision and emits an update even if its bytes happen to match the previous version.
+
+Events commit with metadata changes. Upload-start and partial/failed uploads do
+not produce `file.created`. Folders created at upload start are independently
+committed and can remain after an upload fails; their directory notification is
+valid. Deletion is announced when the file becomes unavailable through REST;
+physical cleanup may finish later or on restart, without another delete event.
+Project deletion that retains files does not announce them as deleted.
+
+The HTML explorer does not connect to raw TCP; its existing Refresh controls still
+apply. Native TCP clients can react to these events immediately. No new database
+migration is needed for notification coverage.
+
+## Create an empty file
+
+In `/files/explorer`, **Create File** sits beside **Upload files**. Its modal asks
+for a filename and an extension (default `txt`) and previews the current folder's
+destination path. Confirm to create an empty file, then click its name to edit it.
+A blank extension creates an extensionless file. Existing same-name files remain
+untouched. The list and sidebar refresh after creation. This uses the normal upload
+API and emits `file.created`. Project directories work the same way: open them
+through the project explorer's **Open files** link.
+
+## Runtime drives
+
+- `GET /files/drives` lists registered identities with `letter`, `path`, `persistent`,
+  `attached`, `online` and `available_bytes` (null when unavailable).
+- `POST /files/drives`, JSON `{"path":"/media/demo/SSD/spark-files"}`, attaches an
+  existing mounted directory and returns its drive record (201). A new storage
+  directory must be empty; known drives reconnect with their existing contents.
+- `DELETE /files/drives/B` detaches B without deleting bytes or metadata (204).
+  Detach waits for file transfers to complete; the permanent server drive returns
+  409. Use the OS to safely eject the disk afterward.
+- `GET /files?drive=B&directory=/documents` filters by drive and logical directory.
+  Omitting `drive` lists across all drives, including offline metadata.
+- `POST /files?name=notes.txt&drive=B` places a new file on B. Unknown letters return
+  404; offline destinations return 503. File metadata includes `drive_letter`.
+
+In the explorer, choose a drive in the left sidebar. Upload/Create File target the
+selected drive. The explorer defaults to persistent storage. Files show their letters and
+an offline label. Attach and detach controls are beside the selector. Refresh
+updates connection state. Empty folders belong to their selected drive.
+Registered drive letters remain reserved across SSD swaps and restarts. Preserve
+`.spark-drive` markers; these identify storage roots, not hardware serial numbers.
+See [configuration](configuration.md) for migration and persistent storage setup.
+
+## Drive-owned directories (API 1.30.0)
+
+`GET /files/directories?drive=B` lists B's folder tree, including empty folders.
+Omitting the drive selects persistent storage. The response contains `drive_id`
+and `directories`. Offline trees remain readable from MariaDB.
+
+`POST /files/directories` accepts `{"directory":"/notes/empty","drive":"B"}`.
+Folders with the same path on A and B are independent. Uploads create parent folders
+only on the destination drive. PATCH `/files/{id}` moves the file within its current
+drive; it does not change physical drives. Folder creation and file moves require
+that drive online, otherwise 503.
+
+Uploads without a drive now use a uniquely matching project drive, or persistent
+storage for non-project paths. Ambiguous project paths on multiple drives return
+409 `drive_required`. There is no capacity/offline fallback to another drive.
+GET `/files` without a drive still lists all files for existing API clients.
+Project links open `/files/explorer?drive=B#<encoded-directory>`.
+
+Migration 018 assigns existing global folders and projects to persistent storage.
+Already assigned file locations are preserved; the migration never moves or
+relabels physical blobs on another drive. Backups include the new directory and
+project ownership through their normal database dump.

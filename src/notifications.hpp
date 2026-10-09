@@ -3,6 +3,7 @@
 #include <memory>
 #include <chrono>
 #include <unordered_set>
+#include <limits>
 
 namespace spark {
 class NotificationStore {
@@ -11,8 +12,9 @@ public:
     void verify() const;
     std::unordered_set<std::string> pulse_subscribers() const;
     void sequence_events() const;
+    std::unordered_set<std::string> device_actions(const std::string& device) const;
     unsigned long long latest() const;
-    nlohmann::json after(unsigned long long sequence) const;
+    nlohmann::json after(unsigned long long sequence, unsigned long long through = std::numeric_limits<unsigned long long>::max()) const;
 private:
     DatabaseConfig config_;
 };

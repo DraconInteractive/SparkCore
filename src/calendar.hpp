@@ -16,7 +16,7 @@ public:
     std::optional<nlohmann::json> get(const std::string& id) const;
     std::optional<nlohmann::json> patch(const std::string& id, const nlohmann::json& packet) const;
     bool remove(const std::string& id) const;
-    nlohmann::json list(const nlohmann::json& filters) const;
+    nlohmann::json list(const nlohmann::json& filters, bool expand = false) const;
 private:
     DatabaseConfig config_;
 };

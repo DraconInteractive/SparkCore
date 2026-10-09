@@ -16,7 +16,7 @@ if [ "$db_user" = root ]; then echo 'Run this script as the SPARK service user, 
     cat sql/004_pulse.sql
     cat sql/005_pulse_subscriptions.sql
     cat sql/006_calendar.sql
-    cat sql/007_daily_tasks.sql sql/008_calendar_recurrence.sql sql/009_files.sql sql/010_file_directories.sql
+    cat sql/007_daily_tasks.sql sql/008_calendar_recurrence.sql sql/009_files.sql sql/010_file_directories.sql sql/011_projects.sql sql/012_project_hierarchy.sql sql/013_project_boards.sql sql/014_file_revisions.sql sql/015_commands.sql sql/016_storage_drives.sql sql/017_runtime_drives.sql sql/018_drive_directories.sql
     printf "GRANT SELECT, INSERT, UPDATE, DELETE ON spark.devices TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, INSERT ON spark.device_events TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, INSERT, UPDATE ON spark.timers TO '%s'@'localhost';\n" "$db_user"
@@ -29,6 +29,10 @@ if [ "$db_user" = root ]; then echo 'Run this script as the SPARK service user, 
     printf "GRANT SELECT, INSERT, UPDATE, DELETE ON spark.daily_tasks TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, UPDATE ON spark.daily_task_day TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, INSERT, UPDATE, DELETE ON spark.files TO '%s'@'localhost';\n" "$db_user"
-    printf "GRANT SELECT, INSERT ON spark.file_directories TO '%s'@'localhost';\n" "$db_user"
+    printf "GRANT SELECT, INSERT, DELETE ON spark.file_directories TO '%s'@'localhost';\n" "$db_user"
+    printf "GRANT SELECT, INSERT, UPDATE, DELETE ON spark.projects TO '%s'@'localhost';\n" "$db_user"
+    for table in project_boards project_columns project_tasks commands device_actions command_queue_lock storage_drives storage_registry_lock; do
+        printf "GRANT SELECT, INSERT, UPDATE, DELETE ON spark.%s TO '%s'@'localhost';\n" "$table" "$db_user"
+    done
 } | sudo mariadb
 printf 'Provisioned spark database for local OS user %s.\n' "$db_user"

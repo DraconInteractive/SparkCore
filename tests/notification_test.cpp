@@ -89,6 +89,10 @@ struct Peer {
         send(json{{"type", "hello"}, {"device_id", id}}.dump() + "\n");
         return until("welcome");
     }
+    json resume(const std::string& id, unsigned long long sequence) {
+        send(json{{"type","hello"},{"device_id",id},{"after_sequence",sequence}}.dump()+"\n");
+        return until("welcome");
+    }
     bool closed(int timeout_ms = 2000) {
         const auto end = Clock::now() + std::chrono::milliseconds(timeout_ms);
         while (Clock::now() < end) {
@@ -346,6 +350,11 @@ int main() {
             slow.run("COMMIT");
             auto late = first.until("test.late");
             check(late["event_id"] == low && late["sequence"] > early["sequence"], "late commit is not skipped");
+            {
+                Peer replay_late(notifications->port());replay_late.resume("late-replay",early["sequence"].get<unsigned long long>());
+                check(replay_late.until("test.late")["event_id"]==low,"resume sequence preserves late lower event ID");
+                replay_late.until("catchup_complete");
+            }
             std::cerr << "TCP test: rollback\n";
             // Rolled-back event must never enter notification_log.
             slow.run("START TRANSACTION");
@@ -403,6 +412,66 @@ int main() {
         Peer idle(notifications->port());
         idle.hello("idle-1");
         check(idle.closed(), "unresponsive heartbeat client disconnected");
+        notifications.reset();
+        options.heartbeat=std::chrono::seconds(1);options.idle_timeout=std::chrono::seconds(30);
+        std::cerr << "TCP test: durable paged replay\n";
+        events->sequence_events();const auto baseline_sequence=events->latest();
+        // More than one SQL page and more than the output buffer, created offline.
+        std::string bulk="INSERT INTO events(type,resource,payload) VALUES ";
+        for(int i=0;i<800;++i){if(i)bulk+=",";bulk+="('test.replay','/replay/"+std::to_string(i)+std::string(210,'x')+"','{}')";}
+        database.run(bulk);
+        for(int i=0;i<4;++i)events->sequence_events();
+        const auto replay_end=events->latest();
+        notifications=std::make_unique<spark::NotificationServer>(events,options);
+        {
+            Peer replay(notifications->port());
+            const auto welcome=replay.resume("replay-1",baseline_sequence);
+            check(welcome["protocol_version"]==2 && welcome["resync_required"]==false && welcome["sequence"]==replay_end,"resume welcome and boundary");
+            database.run("INSERT INTO events(type,resource,payload) VALUES ('test.live','/replay/live','{}')");
+            unsigned long long previous=baseline_sequence;int count=0;bool complete=false,live_seen=false;
+            const auto deadline=Clock::now()+std::chrono::seconds(15);
+            while(Clock::now()<deadline){
+                auto packet=replay.next();const std::string type=packet["type"];
+                if(type=="ping")replay.send("{\"type\":\"pong\"}\n");
+                if(type=="test.replay"){check(!complete && packet["sequence"].get<unsigned long long>()>previous,"replay strict order without duplicates");previous=packet["sequence"];++count;}
+                if(type=="catchup_complete"){check(!complete && count==800 && packet["sequence"]==replay_end,"all pages before catch-up boundary");complete=true;}
+                if(type=="test.live"){check(complete && packet["sequence"]>previous,"live follows replay without gap");live_seen=true;break;}
+            }
+            check(complete && live_seen && count==800,"large replay completed");
+        }
+        // Pulse filtering advances the cursor even when every replayed event is hidden.
+        events->sequence_events();const auto pulse_start=events->latest();
+        database.run("INSERT INTO events(type,resource,payload) VALUES ('pulse.triggered','/pulse','{}')");events->sequence_events();
+        const auto pulse_end=events->latest();
+        {
+            Peer filtered(notifications->port());filtered.resume("not-subscribed",pulse_start);
+            for(;;){auto packet=filtered.next();if(packet["type"]=="ping")filtered.send("{\"type\":\"pong\"}\n");check(packet["type"]!="pulse.triggered","replay respects current subscriptions");if(packet["type"]=="catchup_complete"){check(packet["sequence"]==pulse_end,"filtered replay checkpoint");break;}}
+            database.run("INSERT INTO events(type,resource,payload) VALUES ('pulse.triggered','/pulse','{}')");
+            check(filtered.until("checkpoint")["sequence"]>pulse_end,"filtered live events advance checkpoint");
+        }
+        {
+            Peer subscribed(notifications->port());subscribed.resume("watch-1",pulse_start);
+            subscribed.until("pulse.triggered");subscribed.until("catchup_complete");
+        }
+        for(const std::string invalid:{"-1","1.5","null","true","\"42\"","18446744073709551616"}){
+            Peer peer(notifications->port());peer.send("{\"type\":\"hello\",\"device_id\":\"x\",\"after_sequence\":"+invalid+"}\n");check(peer.next()["error"]=="invalid_hello","invalid resume cursor rejected");
+        }
+        {
+            Peer ahead(notifications->port());const auto w=ahead.resume("ahead",std::numeric_limits<unsigned long long>::max());
+            check(w["resync_required"]==true && w["sequence"].get<unsigned long long>()<std::numeric_limits<unsigned long long>::max(),"future cursor falls back to resync");ahead.until("catchup_complete");
+        }
+        // Resume a completed cursor after a process restart, including an offline event.
+        events->sequence_events();const auto restart_cursor=events->latest();notifications.reset();
+        database.run("INSERT INTO events(type,resource,payload) VALUES ('test.offline','/offline','{}')");
+        notifications=std::make_unique<spark::NotificationServer>(events,options);
+        {
+            Peer peer(notifications->port());peer.resume("restart",restart_cursor);peer.until("test.offline");
+            // Disconnect without recording progress: the same event is replayable.
+        }
+        {
+            Peer retry(notifications->port());retry.resume("restart",restart_cursor);retry.until("test.offline");retry.until("catchup_complete");
+        }
+        notifications.reset();
         std::cout << "TCP framing, broadcast, timer integration, reconnect, heartbeats, and commit ordering passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

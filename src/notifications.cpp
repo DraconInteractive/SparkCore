@@ -55,7 +55,9 @@ int listener(const NotificationOptions& options, int& port) {
 struct NotificationServer::Impl {
     struct Client {
         int fd;
-        bool ready = false, closing = false;
+        bool ready = false, closing = false, initialized = false, pending = false, resume = false, caught_up = false;
+        unsigned long long token = 0, cursor = 0, target = 0;
+        unsigned deferred_pongs = 0;
         std::string input, output, device_id;
         Clock::time_point connected = Clock::now(), received = connected, pinged = connected;
     };
@@ -66,17 +68,23 @@ struct NotificationServer::Impl {
     std::thread publisher, network;
     std::mutex mutex;
     std::condition_variable wake;
-    struct Frame {
-        std::string text;
-        std::shared_ptr<const std::unordered_set<std::string>> recipients;
+    struct Request {
+        unsigned long long token, cursor, through;
+        std::string device_id;
+        bool initialize, resume;
     };
-    std::deque<Frame> queue;
+    struct Result {
+        unsigned long long token, cursor, boundary;
+        bool initialize, resync;
+        std::string frames;
+    };
+    std::deque<Request> requests;
+    std::deque<Result> results;
     bool reset = false;
-    unsigned long long cursor = 0;
+    unsigned long long next_token = 0;
     explicit Impl(std::shared_ptr<NotificationStore> s, NotificationOptions o) : store(std::move(s)), options(std::move(o)) {
         store->verify();
-        // Connected clients always resync via REST, so historical replay isn't required.
-        cursor = store->latest();
+
         socket_fd = listener(options, bound_port);
         try {
             publisher = std::thread([this] { publish(); });
@@ -101,22 +109,43 @@ struct NotificationServer::Impl {
         while (!stopping) {
             try {
                 store->sequence_events();
+                const auto boundary = store->latest();
+                std::deque<Request> jobs;
+                { std::lock_guard<std::mutex> lock(mutex); jobs.swap(requests); }
                 std::shared_ptr<const std::unordered_set<std::string>> subscribers;
-                for (const auto& event : store->after(cursor)) {
-                    const bool pulse = event["type"].get<std::string>().rfind("pulse.", 0) == 0;
-                    if (pulse && !subscribers) subscribers = std::make_shared<const std::unordered_set<std::string>>(store->pulse_subscribers());
-                    const auto frame = event.dump() + "\n";
+                for (const auto& job : jobs) {
+                    if (stopping) break;
+                    const bool resync = job.initialize && (!job.resume || job.cursor > boundary);
+                    Result result{job.token, resync ? boundary : job.cursor, boundary, job.initialize, resync, {}};
+                    // Bound each page by both event count and bytes. A slow reader
+                    // stops requesting pages rather than buffering its entire history.
+                    std::optional<std::unordered_set<std::string>> actions;
+                    for (const auto& event : store->after(result.cursor, job.initialize ? boundary : std::min(boundary,job.through))) {
+                        const bool pulse = event["type"].get<std::string>().rfind("pulse.", 0) == 0;
+                        if (pulse && !subscribers) subscribers = std::make_shared<const std::unordered_set<std::string>>(store->pulse_subscribers());
+                        bool deliver = !pulse || subscribers->count(job.device_id);
+                        if(event["type"]=="command.available") {
+                            if(!actions)actions=store->device_actions(job.device_id);
+                            const auto target=event.value("target_device",json(nullptr));
+                            deliver=(target.is_null()||target==job.device_id)&&actions->count(event["action"].get<std::string>());
+                        } else if(event["type"]=="command.updated") {
+                            deliver=event.value("source_device",json(nullptr))==job.device_id || event.value("target_device",json(nullptr))==job.device_id || event.value("executing_device",json(nullptr))==job.device_id;
+                        }
+                        const auto frame = deliver ? event.dump() + "\n" : std::string();
+                        if (result.frames.size() + frame.size() > 65536) break;
+                        result.frames += frame;
+                        result.cursor = event["sequence"].get<unsigned long long>();
+                    }
                     std::lock_guard<std::mutex> lock(mutex);
-                    if (queue.size() >= 2048) { queue.clear(); reset = true; }
-                    queue.push_back({frame, pulse ? subscribers : nullptr});
-                    cursor = event["sequence"].get<unsigned long long>();
+                    results.push_back(std::move(result));
                 }
                 if (failed) std::cerr << "Notification event polling recovered\n";
                 failed = false;
-            } catch (const std::exception& error) {
-                if (!failed) std::cerr << "Notification event polling will retry: " << error.what() << '\n';
-                // Force clients to reconnect/resync after a database outage.
-                if (!failed) { std::lock_guard<std::mutex> lock(mutex); reset = true; }
+            } catch (const std::exception& exception) {
+                if (!failed) std::cerr << "Notification event polling will retry: " << exception.what() << '\n';
+                // Pending work may have failed part-way through. Drop all sessions;
+                // their durable client cursors make retry safe after recovery.
+                { std::lock_guard<std::mutex> lock(mutex); reset = true; requests.clear(); results.clear(); }
                 failed = true;
             }
             std::unique_lock<std::mutex> lock(mutex);
@@ -134,41 +163,66 @@ struct NotificationServer::Impl {
         }
         const std::string type = packet["type"];
         if (!client.ready) {
+            const bool resume = packet.contains("after_sequence");
             if (type != "hello" || !packet.contains("device_id") || !packet["device_id"].is_string() ||
-                !std::regex_match(packet["device_id"].get<std::string>(), std::regex("[A-Za-z0-9_-]{1,64}")) || packet.size() != 2) {
+                !std::regex_match(packet["device_id"].get<std::string>(), std::regex("[A-Za-z0-9_-]{1,64}")) || packet.size() != (resume ? 3 : 2) ||
+                (resume && !packet["after_sequence"].is_number_unsigned())) {
                 error(client, "invalid_hello"); return;
             }
             client.device_id = packet["device_id"].get<std::string>();
+            client.resume = resume;
+            client.cursor = resume ? packet["after_sequence"].get<unsigned long long>() : 0;
             client.ready = true;
-            client.output += json{{"type", "welcome"}, {"protocol_version", 1}, {"device_id", packet["device_id"]},
-                {"resync_required", true}, {"resources", json::array({"/timers", "/pulse", "/events", "/daily-tasks"})},
-                {"heartbeat_interval_seconds", options.heartbeat.count() / 1000},
-                {"idle_timeout_seconds", options.idle_timeout.count() / 1000}}.dump() + "\n";
-        } else if (type == "ping" && packet.size() == 1) client.output += "{\"type\":\"pong\"}\n";
-        else if (type != "pong" || packet.size() != 1) error(client, "unsupported_message");
+        } else if (type == "ping" && packet.size() == 1) {
+            if(client.initialized)client.output += "{\"type\":\"pong\"}\n";
+            else if(++client.deferred_pongs > 128)error(client,"unsupported_message");
+        } else if (type != "pong" || packet.size() != 1) error(client, "unsupported_message");
         client.received = Clock::now();
     }
     void serve() {
         std::vector<Client> clients;
         while (!stopping) {
-            std::deque<Frame> events;
+            std::deque<Result> pages;
             bool disconnect = false;
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                events.swap(queue);
+                pages.swap(results);
                 disconnect = reset;
                 reset = false;
+                if(disconnect) requests.clear();
             }
             if (disconnect) {
                 for (auto& client : clients) close(client.fd);
                 clients.clear();
             }
-            for (auto& client : clients) if (client.ready && !client.closing) {
-                for (const auto& frame : events) {
-                    if (frame.recipients && !frame.recipients->count(client.device_id)) continue;
-                    if (client.output.size() + frame.text.size() > max_output) { client.closing = true; client.output.clear(); break; }
-                    client.output += frame.text;
+            for (const auto& page : pages) for (auto& client : clients) {
+                if(client.token != page.token || client.closing)continue;
+                client.pending = false;
+                if(page.initialize){
+                    client.initialized = true;client.target = page.boundary;
+                    client.output += json{{"type", "welcome"}, {"protocol_version", client.resume ? 2 : 1}, {"device_id", client.device_id},
+                        {"resync_required", page.resync}, {"sequence", page.boundary},
+                        {"resources", json::array({"/timers", "/pulse", "/events", "/daily-tasks", "/projects", "/files", "/files/drives", "/files/directories", "/devices/"+client.device_id, "/devices/"+client.device_id+"/actions", "/commands?source_device="+client.device_id, "/commands?executing_device="+client.device_id})},
+                        {"heartbeat_interval_seconds", options.heartbeat.count() / 1000},
+                        {"idle_timeout_seconds", options.idle_timeout.count() / 1000}}.dump() + "\n";
+                    while(client.deferred_pongs){client.output += "{\"type\":\"pong\"}\n";--client.deferred_pongs;}
                 }
+                const auto previous = client.cursor;
+                client.output += page.frames;
+                client.cursor = page.cursor;
+                if(client.resume && !client.caught_up && client.cursor >= client.target){
+                    client.output += json{{"type","catchup_complete"},{"sequence",client.cursor}}.dump()+"\n";
+                    client.caught_up = true;
+                }else if(client.resume && client.cursor > previous){
+                    client.output += json{{"type","checkpoint"},{"sequence",client.cursor}}.dump()+"\n";
+                }
+                if(client.output.size()>max_output){client.closing=true;client.output.clear();}
+            }
+            for(auto& client : clients)if(client.ready && !client.closing && !client.pending && client.output.size()<65536){
+                std::lock_guard<std::mutex> lock(mutex);
+                if(requests.size()>=max_clients)continue;
+                requests.push_back({client.token,client.cursor,client.resume && client.initialized && !client.caught_up ? client.target : std::numeric_limits<unsigned long long>::max(),client.device_id,!client.initialized,client.resume});
+                client.pending=true;
             }
             std::vector<pollfd> fds{{socket_fd, POLLIN, 0}};
             for (const auto& client : clients)
@@ -206,7 +260,7 @@ struct NotificationServer::Impl {
                 }
                 if ((!client.ready && now - client.connected > options.hello_timeout) ||
                     now - client.received > options.idle_timeout || (client.closing && client.output.empty())) dead = true;
-                if (client.ready && !client.closing && now - client.pinged >= options.heartbeat) {
+                if (client.initialized && !client.closing && now - client.pinged >= options.heartbeat) {
                     if (client.output.size() + 16 > max_output) dead = true;
                     else client.output += "{\"type\":\"ping\"}\n";
                     client.pinged = now;
@@ -219,7 +273,7 @@ struct NotificationServer::Impl {
                     const int fd = accept4(socket_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
                     if (fd < 0) break;
                     if (clients.size() >= max_clients) close(fd);
-                    else { int keepalive = 1; setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)); clients.push_back(Client{fd}); }
+                    else { int keepalive = 1; setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)); clients.push_back(Client{fd}); clients.back().token=++next_token; }
                 }
             }
         }
@@ -231,16 +285,31 @@ NotificationServer::NotificationServer(std::shared_ptr<NotificationStore> store,
 NotificationServer::~NotificationServer() = default;
 int NotificationServer::port() const { return impl_->bound_port; }
 json notification_discovery(int port) {
-    return {{"transport", "tcp"}, {"port", port}, {"protocol_version", 1}, {"encoding", "UTF-8 newline-delimited JSON"},
-        {"authentication", "none"}, {"hello", {{"type", "hello"}, {"device_id", "watch-1"}}},
-        {"welcome", {{"type", "welcome"}, {"protocol_version", 1}, {"device_id", "watch-1"}, {"resync_required", true},
-                     {"resources", json::array({"/timers", "/pulse", "/events", "/daily-tasks"})}, {"heartbeat_interval_seconds", 30}, {"idle_timeout_seconds", 90}}},
+    return {{"transport", "tcp"}, {"port", port}, {"protocol_version", 2}, {"encoding", "UTF-8 newline-delimited JSON"},
+        {"authentication", "none"}, {"resume_hello", {{"type","hello"},{"device_id","watch-1"},{"after_sequence",42}}},
+        {"catchup_complete", {{"type","catchup_complete"},{"sequence",55}}},
+        {"checkpoint", {{"type","checkpoint"},{"sequence",55}}},
+        {"hello", {{"type", "hello"}, {"device_id", "watch-1"}}},
+        {"welcome", {{"type", "welcome"}, {"protocol_version", 1}, {"device_id", "watch-1"}, {"resync_required", true}, {"sequence",42},
+                     {"resources", json::array({"/timers", "/pulse", "/events", "/daily-tasks", "/projects", "/files", "/files/drives", "/files/directories", "/devices/watch-1"})}, {"heartbeat_interval_seconds", 30}, {"idle_timeout_seconds", 90}}},
+        {"commands", "command.available is filtered to devices currently advertising the action and matching optional target_device. command.updated goes to source, explicit target, and executor. On reconnect and after advertising, POST /devices/{id}/commands/claim until command:null (subject to local execution capacity); also poll periodically. Refresh requester/executor command history through paginated GET /commands. Claims are required before execution; notifications never authorize work."},
         {"notification", {{"sequence", 42}, {"event_id", 123}, {"type", "timer.created"}, {"resource", "/timers/<id>"}, {"source_device", "watch-1"}}},
-        {"event_types", json::array({"timer.created", "timer.expired", "timer.confirmed", "timer.stopped", "pulse.updated", "pulse.triggered", "calendar.created", "calendar.updated", "calendar.deleted", "calendar.reminder", "daily_tasks.updated", "daily_tasks.reset"})},
+        {"event_types", json::array({"timer.created", "timer.expired", "timer.confirmed", "timer.stopped", "pulse.updated", "pulse.triggered", "calendar.created", "calendar.updated", "calendar.deleted", "calendar.reminder", "daily_tasks.updated", "daily_tasks.reset", "board.created", "board.updated", "board.deleted", "file.created", "file.updated", "file.deleted", "files.directories_updated", "drives.updated", "project.created", "project.updated", "project.deleted", "device.created", "device.updated", "device.deleted", "device.subscription_updated", "device.actions_updated", "command.available", "command.updated"})},
+        {"change_notifications", {
+            {"file.created", "Completed durable upload; resource=/files/{id}. Fetch metadata and refresh lists."},
+            {"file.updated", "Text save or move; resource=/files/{id}. Refresh metadata/content and cached directory listings."},
+            {"file.deleted", "Logical removal; resource=/files/{id} now returns 404. Includes project cascades; cleanup retries emit no duplicates."},
+            {"drives.updated", "Drive registration, path or explicit attachment state changed; GET /files/drives for letters and current availability."},
+            {"files.directories_updated", "Directory tree changed on drive_id, including parent creation or project-directory removal; resolve its letter through GET /files/drives and fetch GET /files/directories?drive={letter}."},
+            {"project.created/updated/deleted", "Resource=/projects/{id}. Refresh lists and affected deep trees. Child membership and board changes update the parent/owning project; cascades notify every removed project."},
+            {"device.created/updated/deleted", "Resource=/devices/{id}. Refresh/remove cached registration. source_device is null, not the affected identity."},
+            {"device.subscription_updated", "Resource=/devices/{id}, plus boolean subscribed. Broadcast even to unsubscribed clients; unregistered IDs may return 404. Device deletion does not remove the independent subscription."},
+            {"atomicity", "All changes and events commit together. No-op metadata/subscription requests emit nothing; each successful text save creates a revision and emits file.updated. New families have null source_device. Pre-upgrade changes are not backfilled."}
+        }},
         {"heartbeat", "Reply to server ping with {\"type\":\"pong\"}. Client ping receives pong."},
-        {"reconnect", "Reconnect with exponential backoff and jitter, capped at 30 seconds. Send hello, wait for welcome, then GET /timers, /pulse all pages of /events, and /daily-tasks. Continue processing notifications during refresh."},
-        {"delivery", "Timer, calendar, and daily-task hints go to all connected devices. Pulse events go only to device IDs subscribed through POST /pulse/subscriptions/{device_id}; DELETE unsubscribes. Default unsubscribed. Recipient membership is captured at dispatch; queued frames may still arrive after unsubscribe. No replay or acknowledgement. Refresh REST state after every welcome, reconnect, or uncertain connection. Do not treat event_id as a cursor; sequence is dispatch order."},
-        {"limits", {{"clients", 128}, {"incoming_frame_bytes", 4096}, {"hello_timeout_seconds", 10}, {"outgoing_buffer_bytes", 262144}}},
+        {"reconnect", "Reconnect with backoff and jitter capped at 30 seconds. Send optional after_sequence (unsigned 64-bit integer, last durably processed sequence, not event_id). Omit on first connection or when local state was lost. With a valid cursor, welcome protocol_version=2 and resync_required=false precedes ordered catch-up, catchup_complete, then live events. A cursor ahead of this database falls back to resync_required=true. Legacy hello gets protocol_version=1 and full REST resync. Welcome.sequence is a boundary, not permission to skip unprocessed events."},
+        {"delivery", "Durable ordered replay uses sequence, never event_id. Persist cursors only after processing preceding notifications successfully; duplicates across reconnects are possible. checkpoint/catchup_complete permit advancing past subscription-filtered events. Pulse membership is checked when each page is read (current subscription also applies to history); queued frames may arrive after unsubscribe. REST remains authoritative: historical reminders are hints, not instructions to re-alert. No delivery or user acknowledgement; event history currently has no automatic pruning. If resync_required, refresh welcome.resources including all pages, directory trees for every registered drive, and project boards before saving the welcome boundary; continue consuming notifications during refresh."},
+        {"limits", {{"clients", 128}, {"incoming_frame_bytes", 4096}, {"hello_timeout_seconds", 10}, {"outgoing_buffer_bytes", 262144}, {"page_events",256}, {"page_bytes",65536}}},
         {"errors", json::array({"invalid_message", "invalid_hello", "unsupported_message", "frame_too_large"})}};
 }
 }
