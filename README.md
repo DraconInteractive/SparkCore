@@ -494,3 +494,8 @@ remains persistent. See [configuration](docs/configuration.md).
 Directories now belong to drives, including empty folders. Projects select a drive
 at creation; children inherit it. Offline project metadata and boards stay usable,
 while file operations require the selected drive. See [project storage](docs/projects.md).
+
+Device tokens can be provisioned from **Device access** on the dashboard
+(`/admin/credentials/explorer`). An administrator with `admin.credentials` can
+select permissions, copy a newly issued token once, and revoke device credentials.
+See [browser device provisioning](docs/identity-permissions.md#browser-device-provisioning-api-1340).

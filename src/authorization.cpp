@@ -26,6 +26,9 @@ const std::vector<RoutePolicy>& route_policies(){
             out.push_back({method,path,std::move(permissions),std::regex(pattern),own});
         };
         for(auto path:{"/","/health","/version","/api","/api/docs"})add("GET",path,{"discovery.read"});
+        for(auto path:{"/admin/credentials","/admin/credentials/explorer"})add("GET",path,{"admin.credentials"});
+        add("POST","/admin/credentials",{"admin.credentials"});
+        add("DELETE","/admin/credentials/{id}",{"admin.credentials"});
         add("GET","/admin/status",{"admin.restart","admin.backup"});
         add("GET","/admin/backup-locations",{"admin.backup"});
         add("POST","/admin/restart",{"admin.restart"});add("POST","/admin/backup",{"admin.backup"});

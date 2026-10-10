@@ -31,6 +31,7 @@ public:
 class TokenIdentityProvider final : public IdentityProvider {
 public:
     explicit TokenIdentityProvider(std::filesystem::path file);
+    const std::filesystem::path& credentials_file()const{return file_;}
     std::optional<Identity> authenticate(const std::string&) const override;
     bool current(const Identity&) const override;
 private:

@@ -141,6 +141,16 @@ async def exercise_firefox(profile,admin,root):
             await wait("document.body.textContent.includes('Signed in as owner')")
             assert not await evaluate("document.cookie.includes('__Host-spark_session')")
             assert not await evaluate("Object.values(localStorage).some(v=>v.includes('spark1_'))")
+            await navigate('/admin/credentials/explorer')
+            await wait("!document.getElementById('issue').disabled")
+            await evaluate("document.getElementById('subject').value='firefox-watch';document.getElementById('create').requestSubmit();true")
+            await wait("!document.getElementById('secret').hidden && document.getElementById('token').value.startsWith('spark1_') && document.getElementById('records').textContent.includes('firefox-watch')")
+            assert not await evaluate("Object.values(localStorage).concat(Object.values(sessionStorage)).some(v=>v.includes('spark1_'))")
+            await evaluate("document.getElementById('dismiss').click();true")
+            assert await evaluate("document.getElementById('token').value===''")
+            await evaluate("window.confirm=()=>true;Array.from(document.querySelectorAll('#records article')).find(a=>a.querySelector('strong').textContent==='firefox-watch').querySelector('button').click();true")
+            await wait("Array.from(document.querySelectorAll('#records article')).some(a=>a.querySelector('strong').textContent==='firefox-watch' && a.textContent.includes('Revoked'))")
+            await navigate('/files/explorer')
             # Actual modal creates a file, XHR uploads another, and text editing saves.
             await wait("!document.getElementById('file-create').disabled")
             await evaluate("document.getElementById('file-create').click();document.getElementById('file-name').value='browser-created';document.getElementById('file-name').form.requestSubmit();true")
@@ -164,7 +174,7 @@ async def exercise_firefox(profile,admin,root):
             await wait("location.pathname==='/login'")
             await ws.close()
         finally:proc.terminate();proc.wait(timeout=15)
-    print('Firefox HTTPS login, HttpOnly cookie, file modal/upload/edit, project/docs/command explorers, dashboard and logout passed.')
+    print('Firefox HTTPS login, device-token provisioning/revocation, HttpOnly cookie, file modal/upload/edit, project/docs/command explorers, dashboard and logout passed.')
 
 sql('CREATE DATABASE '+database,False)
 try:
@@ -202,6 +212,29 @@ try:
             browser_call('GET','/files',vc)
             browser_call('POST','/files/directories',vc,vp['csrf_token'],{'directory':'/denied'},403)
             browser_call('POST','/admin/restart',vc,vp['csrf_token'],{},403,extra={'X-SPARK-Admin':'dashboard'})
+            # Provisioning uses the same cookie/CSRF gate; tokens never return in lists.
+            browser_call('GET','/admin/credentials/explorer',cookie)
+            browser_call('GET','/admin/credentials',vc,status=403)
+            payload={'subject':'managed-watch','permissions':['discovery.read','events.read','notifications.read']}
+            browser_call('POST','/admin/credentials',cookie,body=payload,status=403)
+            browser_call('POST','/admin/credentials',cookie,csrf,payload,403,extra={'Origin':'https://evil.example'})
+            minted=browser_call('POST','/admin/credentials',cookie,csrf,payload,201)[0]
+            call('GET','/health',minted['token'])
+            call('POST','/timers',minted['token'],{'duration_seconds':60},403)
+            records=browser_call('GET','/admin/credentials',cookie)[0]
+            assert minted['token'] not in json.dumps(records) and 'token_sha256' not in json.dumps(records)
+            assert all(r['kind']=='device' for r in records['credentials'])
+            for invalid in ({**payload,'kind':'administrator'},{**payload,'subject':'bad/name'},{**payload,'permissions':[]},{**payload,'permissions':['events.read','events.read']}):
+                browser_call('POST','/admin/credentials',cookie,csrf,invalid,400)
+            browser_call('POST','/admin/credentials',cookie,csrf,{**payload,'permissions':['admin.backup']},403)
+            limited=issue('administrator','provisioner','admin.credentials','discovery.read')['token']
+            call('POST','/admin/credentials',limited,payload,403)
+            call('POST','/admin/credentials',limited,{'subject':'limited-device','permissions':['discovery.read']},201)
+            browser_call('DELETE','/admin/credentials/'+admin_record['id'],cookie,csrf,status=404)
+            browser_call('DELETE','/admin/credentials/'+minted['id'],cookie,status=403)
+            browser_call('DELETE','/admin/credentials/'+minted['id'],cookie,csrf,status=204)
+            browser_call('DELETE','/admin/credentials/'+minted['id'],cookie,csrf,status=204)
+            call('GET','/health',minted['token'],status=401)
             # A browser never creates a fake device: command requester comes from identity.
             command=browser_call('POST','/commands',cookie,csrf,{'action':'browser.status','idempotency_key':'browser'},202)[0]
             assert command['source_device'] is None and command['source_admin']=='owner'
@@ -225,7 +258,7 @@ try:
                 asyncio.run(exercise_firefox(profile,admin,root))
             packet,headers=login(admin);cookie=headers['Set-Cookie'].split(';')[0]
             cli('revoke',credentials,admin_record['id']);browser_call('GET','/auth/session',cookie,status=401)
-            print('Browser login, CSRF, origin, permissions, administrator command identity, rotation, logout, restart and revocation passed.')
+            print('Browser login, device-token provisioning/revocation, CSRF, origin, permissions, administrator command identity, rotation, logout, restart and revocation passed.')
         except BaseException:
             log.seek(0);print(log.read().decode())
             if (root/'firefox.log').exists():print((root/'firefox.log').read_text()[-3000:])

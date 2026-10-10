@@ -16,6 +16,25 @@ TCP, also valid for `spark.dracon.au`, under the explicit certificate name
 renew independently. Only nginx's dedicated TCP service is reloaded by the
 Certbot hook. Do not use Certbot standalone mode or replace the Caddy binary.
 
+## Current VPS operation and deferred systemd migration
+
+Decision recorded 2026-10-10: continue running the SPARK application in tmux
+for now. HTTPS administrator login and an external TCP TLS handshake have been
+verified. Caddy and the TCP proxy retain their existing systemd services.
+
+Run SPARK as `pmc`, with working directory `/home/pmc/SparkCore`:
+
+```sh
+./build/spark_server --config /home/pmc/SparkCore/config/config.json --remote
+```
+
+When ready, migrate the SPARK application to a dedicated systemd unit with
+`User=pmc`, the working directory and command above, startup after MariaDB,
+automatic restart on failure, and enablement at boot. Preserve credential ownership
+and `/home/pmc/spark-data/files`. Stop the tmux instance before starting the unit
+to avoid duplicate processes and port conflicts. This migration is deferred until
+the user is ready; tmux does not provide startup after a VPS reboot.
+
 ## Prepare while DNS propagates
 
 Commands below run on the VPS, from a checkout of this SPARK repository unless

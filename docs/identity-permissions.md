@@ -90,7 +90,7 @@ These rules are enforced by the shared route allowlist:
 | `notifications.read` | Connect and replay, additionally requiring the relevant resource read permission |
 | `admin.restart`, `admin.backup` | Restart service, manage/run backups; `/admin/status` requires both because it exposes shared maintenance results |
 | `admin.storage` | Attach/detach storage roots (listing requires `files.read`) |
-| `admin.credentials` | Reserved for future remote credential administration; local tool is controlled by OS file permissions |
+| `admin.credentials` | Manage device tokens through /admin/credentials; requires administrator identity. Local tool is controlled by OS file permissions |
 
 Indirect operations combine permissions: project file listings/download links need
 `projects.read` and `files.read`; creating a project's folder needs `projects.write`
@@ -173,3 +173,31 @@ termination is supplied by the [remote deployment profile](remote-deployment.md)
 `test-authentication.py` integration suite, including every documented route,
 HEAD aliases, device ownership, streams, commands, TCP replay/revocation, and
 maintenance restart. No production data or credentials are used.
+
+## Browser device provisioning (API 1.34.0)
+
+Open **Device access** on the dashboard or `/admin/credentials/explorer`. Sign in
+with an administrator token granting `admin.credentials`. Choose the device ID
+(letters, digits, underscores or hyphens, up to 64 characters) and permissions,
+then create and securely transfer the token. The token is displayed once and is
+not stored in browser storage; listings omit both tokens and hashes. This does
+not create a device registry entry: grant `devices.write` if the device registers
+itself. `discovery.read` permits `/api`; `notifications.read` enables TCP events
+only for resource families the device can read.
+
+`GET /admin/credentials` returns `{credentials: [...], permissions: [...]}`.
+`POST /admin/credentials` accepts `{subject: "watch-1", permissions: [...]}` and
+returns status 201 with `{id, token}`. Permissions must be a nonempty unique list
+of known non-administrator grants held by the issuing administrator; extra fields
+are rejected. `DELETE /admin/credentials/{id}` revokes a device credential (204,
+including repeated revocation; 404 for unknown or administrator credentials).
+The page and routes require token mode (409 in open mode), an administrator
+identity and `admin.credentials`. Session mutations also require the existing
+Origin and CSRF checks. Permission escalation and administrator credential
+creation/revocation are not available here; retain the local CLI for administrator
+management. Any authorized credential administrator can revoke device credentials.
+
+To rotate a device token, issue another for the same device ID, switch the device,
+then revoke the old credential. Revocation applies to REST and live/replayed TCP
+through the shared provider. No database migration is required. The running OS
+user must be able to write the private credential file and its parent directory.

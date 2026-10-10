@@ -38,7 +38,7 @@ int main() {
         check(api && api->status == 200, "discovery status");
         auto document = nlohmann::json::parse(api->body);
         check(document["authentication"] == "none", "authentication");
-        check(document["endpoints"].size() == 82, "endpoint count");
+        check(document["endpoints"].size() == 86, "endpoint count");
         for (const auto& endpoint : document["endpoints"]) {
             if(endpoint.contains("access"))continue;
             if (endpoint["path"].get<std::string>().find("/commands") == 0 || endpoint["path"] == "/devices/{id}/actions" || endpoint["path"] == "/" || endpoint["path"].get<std::string>().find("/admin/") == 0 || endpoint["path"] == "/project/{id}/files" || endpoint["path"].get<std::string>().find("/projects") == 0 || endpoint["path"].get<std::string>().find("/files") == 0 || endpoint["path"] == "/api/docs" || endpoint["path"].get<std::string>().find("/daily-tasks") == 0 || endpoint["path"].get<std::string>().find("/events") == 0 || endpoint["method"] != "GET" || endpoint["path"] == "/pulse" || endpoint["path"].get<std::string>().find("/timers") == 0 || endpoint["path"] == "/devices/{id}") continue;
@@ -55,6 +55,10 @@ int main() {
             check(head && head->status == 200 && head->body.empty(), "HEAD support");
             auto options = client.Options(endpoint["path"].get<std::string>());
             check(options && options->status == 204, "OPTIONS support");
+        }
+        for(const auto* path:{"/admin/credentials","/admin/credentials/explorer"}){
+            auto disabled=client.Get(path);
+            check(disabled && disabled->status==409,"credential management disabled in open mode");
         }
         auto docs = client.Get("/api/docs");
         check(docs && docs->status == 200 && docs->get_header_value("Content-Type") == "text/html; charset=utf-8", "HTML docs route");
