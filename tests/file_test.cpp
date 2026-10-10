@@ -90,7 +90,7 @@ int main(int argc,char**){
                 check(saved["id"]==textfile["id"] && saved["directory"]==textfile["directory"] && saved["created_at"]==textfile["created_at"] && saved["size_bytes"]==edited.size(),"edit preserves identity and updates size");
                 auto edited_download=client.Get(texturl);check(edited_download->body==edited && edited_download->get_header_value("ETag")!=original_tag && edited_download->get_header_value("ETag")==saved_response->get_header_value("ETag"),"edit byte integrity and revision");
                 expect(client.Put(texturl,match,"stale","text/plain"),412,"file_changed");
-                auto slice=client.Get(texturl,{{"Range","bytes=0-2"}});check(slice->status==206 && slice->body==edited.substr(0,3),"range after edit");
+                auto slice=client.Get(texturl,httplib::Headers{{"Range","bytes=0-2"}});check(slice->status==206 && slice->body==edited.substr(0,3),"range after edit");
                 match={{"If-Match",edited_download->get_header_value("ETag")}};
                 db.run("CREATE TRIGGER fail_text_edit BEFORE UPDATE ON files FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='edit test'");
                 expect(client.Put(texturl,match,"failed","text/plain"),503,"database_unavailable");
@@ -111,8 +111,8 @@ int main(int argc,char**){
                 auto orphan=durable_saved;orphan["content_revision"]=std::string(32,'a');std::ofstream(storage->content_path(orphan))<<"uncommitted";
                 auto empty=upload("empty","");auto empty_response=client.Get(content_url(empty));check(empty_response && empty_response->status==200 && empty_response->body.empty(),"empty file");
                 auto html=upload("a%22%F0%9F%8C%B3.html","<script>alert(1)</script>");auto html_response=client.Get(content_url(html));
-                check(html_response && html_response->get_header_value("Content-Type")=="application/octet-stream" && html_response->get_header_value("X-Content-Type-Options")=="nosniff" && html_response->get_header_value("Content-Disposition").find("a\"🌳.html")!=std::string::npos,"arbitrary type and encoded attachment filename");
-                // httplib decodes percent escapes in received headers; inspect the wire too.
+                check(html_response && html_response->get_header_value("Content-Type")=="application/octet-stream" && html_response->get_header_value("X-Content-Type-Options")=="nosniff" && html_response->get_header_value("Content-Disposition").find("filename*=UTF-8''a%22%F0%9F%8C%B3.html")!=std::string::npos,"arbitrary type and encoded attachment filename");
+                // Verify the encoded attachment filename on the wire as well.
                 int header_fd=socket(AF_INET,SOCK_STREAM,0);sockaddr_in header_addr{};header_addr.sin_family=AF_INET;header_addr.sin_port=htons(port);inet_pton(AF_INET,"127.0.0.1",&header_addr.sin_addr);
                 check(connect(header_fd,reinterpret_cast<sockaddr*>(&header_addr),sizeof(header_addr))==0,"header connect");
                 auto header_request="HEAD "+content_url(html)+" HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -131,8 +131,8 @@ int main(int argc,char**){
                 std::size_t received=0;auto download=client.Get(content_url(large),[&](const char* bytes,std::size_t length){for(std::size_t i=0;i<length;++i)check(static_cast<unsigned char>(bytes[i])==(received+i)%256,"binary streaming integrity");received+=length;return true;});
                 check(download && download->status==200 && received==total,"streaming download");
                 auto head=client.Head(content_url(large));check(head && head->status==200 && head->body.empty() && head->get_header_value("Content-Length")==std::to_string(total),"HEAD size");
-                auto range=client.Get(content_url(large),{{"Range","bytes=250-269"}});check(range && range->status==206 && range->body==block.substr(250,20),"byte-range resume");
-                auto bad_range=client.Get(content_url(large),{{"Range","bytes=999999999-"}});check(bad_range && bad_range->status==416,"invalid range");
+                auto range=client.Get(content_url(large),httplib::Headers{{"Range","bytes=250-269"}});check(range && range->status==206 && range->body==block.substr(250,20),"byte-range resume");
+                auto bad_range=client.Get(content_url(large),httplib::Headers{{"Range","bytes=999999999-"}});check(bad_range && bad_range->status==416,"invalid range");
                 auto chunked=expect(client.Post("/files?name=chunked.bin",[&](std::size_t offset,httplib::DataSink& sink){if(offset>=block.size()){sink.done();return true;}return sink.write(block.data()+offset,std::min<std::size_t>(8192,block.size()-offset));},"application/octet-stream"),201);
                 check(client.Get(content_url(chunked))->body==block,"chunked upload");
                 auto duplicate=upload("large.bin","different");check(duplicate["id"]!=large["id"],"duplicate names do not overwrite");
@@ -157,7 +157,7 @@ int main(int argc,char**){
                 // Sparse large file verifies 64-bit sizes and offsets without using disk space.
                 auto sparse=store->begin("Sparse");int sparse_fd=open(storage->path(sparse).c_str(),O_CREAT|O_RDWR,0600);check(sparse_fd>=0,"sparse open");
                 const off_t huge=static_cast<off_t>(5)*1024*1024*1024;check(ftruncate(sparse_fd,huge)==0 && pwrite(sparse_fd,"END",3,huge-3)==3,"sparse write");close(sparse_fd);store->publish(sparse,huge);
-                auto tail=client.Get("/files/"+sparse+"/content",{{"Range","bytes=5368709117-5368709119"}});check(tail && tail->status==206 && tail->body=="END","download offsets beyond 4 GiB");expect(client.Delete("/files/"+sparse),204);
+                auto tail=client.Get("/files/"+sparse+"/content",httplib::Headers{{"Range","bytes=5368709117-5368709119"}});check(tail && tail->status==206 && tail->body=="END","download offsets beyond 4 GiB");expect(client.Delete("/files/"+sparse),204);
                 db.run("CREATE TRIGGER fail_file_publish BEFORE UPDATE ON files FOR EACH ROW BEGIN IF NEW.state='ready' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='test'; END IF; END");
                 expect(client.Post("/files?name=unpublished","bytes","application/octet-stream"),503,"database_unavailable");
                 check(store->unfinished().size()==1,"failed publication remains recoverable");db.run("DROP TRIGGER fail_file_publish");
