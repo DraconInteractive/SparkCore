@@ -8,6 +8,12 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sstream>
+#include <iostream>
+#include <chrono>
 extern char **environ;
 namespace spark {
 namespace {
@@ -20,23 +26,24 @@ constexpr const char* html=R"HTML(<!doctype html>
 <style>body{margin:0;background:#101820;color:#e5edf3;font:16px system-ui}main{max-width:950px;margin:auto;padding:48px 24px}h1{font-size:48px;margin-bottom:8px}p{color:#adc1ce}nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:32px 0}nav a,section{background:#1a2935;border:1px solid #324957;border-radius:12px;padding:24px}a{color:#78dfcc;text-decoration:none}nav a strong{display:block;font-size:22px;margin-bottom:8px}button,input,select{font:inherit;padding:10px;border-radius:6px;border:1px solid #56717f}button{background:#78dfcc;color:#102029;cursor:pointer}button:disabled{opacity:.5}label{display:block;margin:16px 0 6px}input,select{box-sizing:border-box;width:100%;background:#101820;color:white}dialog{max-width:520px;width:80%;background:#1a2935;color:white;border:1px solid #56717f;border-radius:12px}dialog::backdrop{background:#0009}.actions{display:flex;gap:12px;margin-top:20px}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto}#status{color:#78dfcc}</style>
 <main><h1>SPARK</h1><p>Your devices, projects and shared files.</p><div id="status" role="status">Connecting…</div>
 <nav><a href="/backups/explorer" data-spark-permission="admin.backup"><strong>Backups</strong>Manage and transfer backups</a><a href="/connections/explorer" data-spark-permission="admin.connections"><strong>Connections</strong>Manage other SPARK instances</a><a href="/projects/explorer"><strong>Projects</strong>Projects, boards and tasks</a><a href="/files/explorer"><strong>Files</strong>Browse, edit and share files</a><a href="/commands/explorer"><strong>Commands</strong>Run device actions and inspect results</a><a href="/api/docs"><strong>API reference</strong>Explore endpoints and packets</a><a id="credentials-link" href="/admin/credentials/explorer" data-spark-permission="admin.credentials"><strong>Device access</strong>Provision and revoke device tokens</a></nav>
-<section><h2>Server controls</h2><p>Restart briefly disconnects devices. Backup pauses REST and TCP while files and database are compressed and verified, then brings SPARK back online.</p><div class="actions"><button id="restart" data-spark-permission="admin.restart">Restart server</button><button id="backup" data-spark-permission="admin.backup">Back up storage</button></div><pre id="result" aria-live="polite"></pre></section></main>
-<dialog id="dialog"><form id="form"><h2>Back up storage</h2><p>Leave the mount blank to save on persistent SPARK storage, or select an external mounted drive. Existing backups are kept.</p><label for="previous">Backup location</label><select id="previous"><option value="">New location</option></select><label for="mount">Drive mount path</label><input id="mount" placeholder="/media/demo/backup-drive"><label for="destination">Backup directory (optional)</label><input id="destination" placeholder="Defaults to mount/spark-backups"><div class="actions"><button type="submit">Start backup</button><button type="button" id="cancel">Cancel</button></div></form></dialog>
+<section><h2>Server controls</h2><p>Restart briefly disconnects devices. Backup pauses ordinary REST and TCP while files and database are compressed and verified. The authenticated backup progress page stays available.</p><div class="actions"><button id="restart" data-spark-permission="admin.restart">Restart server</button><button id="backup" data-spark-permission="admin.backup">Back up storage</button></div><p><a href="/backups/progress" data-spark-permission="admin.backup">View backup progress and log</a></p><pre id="result" aria-live="polite"></pre></section></main>
 <script src="/auth/client.js"></script>
 <script>
 sparkSession.ready.then(s=>{if(s.mode==='open')document.getElementById('credentials-link').hidden=true;}).catch(()=>{});
 const $=id=>document.getElementById(id);let waiting=false,locations=[],localError='';
-async function refresh(){try{const session=await sparkSession.ready;if(session.mode==='session'&&!['admin.restart','admin.backup'].every(p=>session.permissions.includes(p))){const r=await fetch('/version');if(!r.ok)throw Error('Unavailable');$('status').textContent='Online · SPARK '+(await r.json()).server_version;$('restart').disabled=$('backup').disabled=false;return;}const r=await fetch('/admin/status');if(!r.ok)throw Error('Unavailable');const s=await r.json();$('status').textContent='Online · SPARK '+s.version;const busy=s.state==='queued';$('restart').disabled=$('backup').disabled=busy;if(!busy)waiting=false;$('result').textContent=localError||s.message|| (busy?'Maintenance accepted. Waiting for SPARK to return…':'');}catch(e){$('status').textContent=waiting?'Maintenance in progress · reconnecting…':'Server unavailable · reconnecting…';}}
-async function action(path,body){$('restart').disabled=$('backup').disabled=true;try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-SPARK-Admin':'dashboard'},body:JSON.stringify(body)});const s=await r.json();if(!r.ok)throw Error(s.error);localError='';waiting=true;$('result').textContent='Maintenance accepted. This page will reconnect automatically.';$('dialog').close();}catch(e){localError=e.message;$('result').textContent=e.message;$('restart').disabled=$('backup').disabled=false;}}
+async function refresh(){try{const session=await sparkSession.ready;if(session.mode==='session'&&!['admin.restart','admin.backup'].every(p=>session.permissions.includes(p))){const r=await fetch('/version');if(!r.ok)throw Error('Unavailable');$('status').textContent='Online · SPARK '+(await r.json()).server_version;$('restart').disabled=$('backup').disabled=false;return;}const r=await fetch('/admin/status');if(!r.ok)throw Error('Unavailable');const s=await r.json();$('status').textContent='Online · SPARK '+s.version;const busy=s.state==='queued'||s.state==='running';$('restart').disabled=$('backup').disabled=busy;if(!busy)waiting=false;$('result').textContent=localError||s.message|| (busy?'Maintenance accepted. Waiting for SPARK to return…':'');}catch(e){$('status').textContent=waiting?'Maintenance in progress · reconnecting…':'Server unavailable · reconnecting…';}}
+async function action(path,body){$('restart').disabled=$('backup').disabled=true;try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-SPARK-Admin':'dashboard'},body:JSON.stringify(body)});const s=await r.json();if(!r.ok)throw Error(s.error);localError='';waiting=true;$('result').textContent='Maintenance accepted. This page will reconnect automatically.';}catch(e){localError=e.message;$('result').textContent=e.message;$('restart').disabled=$('backup').disabled=false;}}
 $('restart').onclick=()=>{if(confirm('Restart SPARK and disconnect devices briefly?'))action('/admin/restart',{});};
-$('backup').onclick=async()=>{try{const r=await fetch('/admin/backup-locations');if(!r.ok)throw Error('Cannot load backup locations');locations=(await r.json()).locations;$('previous').replaceChildren(new Option('Persistent storage / new external location',''));locations.forEach((l,i)=>$('previous').add(new Option(l.mount+' → '+l.destination,String(i))));$('mount').value=$('destination').value='';$('dialog').showModal();}catch(e){localError=e.message;$('result').textContent=e.message;}};
-$('previous').onchange=()=>{const l=locations[$('previous').value];$('mount').value=l?l.mount:'';$('destination').value=l?l.destination:'';};$('cancel').onclick=()=>$('dialog').close();$('form').onsubmit=e=>{e.preventDefault();action('/admin/backup',{mount:$('mount').value,destination:$('destination').value});};refresh();setInterval(refresh,2000);
+$('backup').onclick=()=>location.assign('/backups/new');refresh();setInterval(refresh,2000);
 </script></html>)HTML";
 }
 void Maintenance::execute() {
     const int action=requested.load();
     nlohmann::json outcome={{"state","succeeded"},{"message","Server restarted."}};
     if(action==2) {
+        initialize();
+        try {auto fresh=estimate(mount,destination);progress({{"estimate",fresh}});if(!fresh["space_sufficient"].get<bool>())throw std::runtime_error("insufficient_backup_space");}
+        catch(const std::exception& e){outcome={{"state","failed"},{"message",std::string("Backup preflight failed: ")+e.what()}};progress({{"state","failed"},{"stage","preflight"},{"message",outcome["message"]},{"finished_at",time(nullptr)},{"process_alive",false}});std::lock_guard<std::mutex> lock(mutex);result=outcome;requested=0;return;}
         int pipes[2];
         if(pipe(pipes)!=0) outcome={{"state","failed"},{"message","Cannot start backup: pipe failed."}};
         else {
@@ -52,14 +59,41 @@ void Maintenance::execute() {
             std::vector<char*> argv;for(auto& arg:args)argv.push_back(arg.data());argv.push_back(nullptr);
             pid_t pid;int rc=posix_spawn(&pid,script.c_str(),&actions,nullptr,argv.data(),environ);
             posix_spawn_file_actions_destroy(&actions);close(pipes[1]);
-            std::string output;char buffer[4096];ssize_t count;
-            while((count=read(pipes[0],buffer,sizeof(buffer)))>0){output.append(buffer,count);if(output.size()>32768)output.erase(0,output.size()-32768);}
+            auto initial=snapshot();const auto log_path=initial["log_path"].get<std::string>();int log_fd=open(log_path.c_str(),O_WRONLY|O_APPEND|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
+            std::string output,pending,archive;char buffer[4096];bool eof=false;uint64_t previous_ticks=0,previous_bytes=0;int verified=0;
+            auto observe=[&]{
+                uint64_t ticks=0;bool alive=false;std::vector<int> pids;if(rc==0)pids.push_back(pid);
+                for(size_t i=0;i<pids.size()&&i<256;++i){auto base="/proc/"+std::to_string(pids[i]);std::ifstream children(base+"/task/"+std::to_string(pids[i])+"/children");int child;while(children>>child)pids.push_back(child);std::ifstream in(base+"/stat");std::string line;std::getline(in,line);auto end=line.rfind(')');if(end!=std::string::npos){if(i==0&&end+2<line.size())alive=line[end+2]!='Z'&&line[end+2]!='X';std::istringstream fields(line.substr(end+2));std::string part;for(int j=0;j<=12&&fields>>part;++j)if(j==11||j==12)try{ticks+=std::stoull(part);}catch(...){} }}
+                uint64_t bytes=0;std::error_code error;if(!archive.empty())for(auto& f:std::filesystem::directory_iterator(archive,error)){if(f.is_regular_file(error))bytes+=f.file_size(error);}
+                nlohmann::json patch={{"state","running"},{"process_alive",rc==0&&!eof&&alive},{"process_id",rc==0?int(pid):0},{"output_bytes",bytes},{"cpu_ticks",ticks},{"verified_files",verified},{"log_tail",output}};
+                if(ticks!=previous_ticks||bytes!=previous_bytes)patch["last_activity_at"]=time(nullptr);previous_ticks=ticks;previous_bytes=bytes;progress(patch);
+            };
+            fcntl(pipes[0],F_SETFL,fcntl(pipes[0],F_GETFL)|O_NONBLOCK);
+            auto next=std::chrono::steady_clock::now();
+            while(!eof){pollfd descriptor{pipes[0],POLLIN,0};poll(&descriptor,1,500);ssize_t count;
+                while((count=read(pipes[0],buffer,sizeof(buffer)))>0){
+                    std::cout.write(buffer,count);std::cout.flush();if(log_fd>=0){size_t offset=0;while(offset<size_t(count)){auto n=write(log_fd,buffer+offset,size_t(count)-offset);if(n<0&&errno==EINTR)continue;if(n<=0)break;offset+=n;}}
+                    output.append(buffer,count);if(output.size()>32768)output.erase(0,output.size()-32768);pending.append(buffer,count);size_t newline;
+                    while((newline=pending.find('\n'))!=std::string::npos){auto line=pending.substr(0,newline);pending.erase(0,newline+1);
+                        if(line.rfind("SPARK_STAGE ",0)==0){auto stage=line.substr(12);auto space=stage.find(' ');progress({{"stage",stage.substr(0,space)},{"stage_detail",space==std::string::npos?"":stage.substr(space+1)},{"last_activity_at",time(nullptr)}});}
+                        else if(line.rfind("SPARK_BACKUP_DIRECTORY ",0)==0)archive=line.substr(23);
+                        else if(line.rfind("Backup complete: ",0)==0)archive=line.substr(17);
+                        if(line.size()>4&&line.substr(line.size()-4)==": OK")++verified;
+                    }
+                }
+                if(count==0)eof=true;else if(count<0&&errno!=EAGAIN&&errno!=EINTR)eof=true;
+                if(std::chrono::steady_clock::now()>=next||eof){try{observe();}catch(const std::exception& e){std::cerr<<"Backup activity observation failed: "<<e.what()<<std::endl;}next=std::chrono::steady_clock::now()+std::chrono::seconds(1);}
+            }
+            if(log_fd>=0){fsync(log_fd);close(log_fd);}
             close(pipes[0]);int status=0;
             if(rc==0){while(waitpid(pid,&status,0)<0){if(errno!=EINTR){rc=-1;break;}}}
             const bool ok=rc==0 && WIFEXITED(status) && WEXITSTATUS(status)==0;
+            progress({{"state",ok?"succeeded":"failed"},{"stage",ok?"complete":"failed"},{"finished_at",time(nullptr)},{"process_alive",false},{"message",ok?"Backup completed and verified.":"Backup failed. Review the log; incomplete files may remain."},{"log_tail",output}});
+            if(ok)try{record_success();}catch(const std::exception& e){std::cerr<<"Backup completed but timing history could not be saved: "<<e.what()<<std::endl;}
             outcome={{"state",ok?"succeeded":"failed"},{"message",std::string(ok?"Backup completed.\n":"Backup failed.\n")+output}};
         }
     }
+    if(action==2){auto status=snapshot();if(status["state"]=="queued"||status["state"]=="running")progress({{"state","failed"},{"message",outcome["message"]},{"finished_at",time(nullptr)},{"process_alive",false}});}
     std::lock_guard<std::mutex> guard(mutex);result=outcome;requested=0;
 }
 void configure_dashboard(httplib::Server& server,std::shared_ptr<Maintenance> state, std::shared_ptr<Authorization> auth) {
@@ -85,8 +119,11 @@ void configure_dashboard(httplib::Server& server,std::shared_ptr<Maintenance> st
         if(action==2){if((body.contains("mount") && !body["mount"].is_string()) || (body.contains("destination")&&!body["destination"].is_string())){fail(400,"invalid_backup_location");return;}mount=body.value("mount",std::string{});dest=body.value("destination",std::string{});
             auto valid=[](const std::string& s){return s.size()<4096 && s.find_first_of(std::string("\0\t\r\n",4))==std::string::npos;};
             if((!mount.empty()&&mount[0]!='/') || (mount.empty()&&!dest.empty()) || (!dest.empty()&&dest[0]!='/') || !valid(mount)||!valid(dest)){fail(400,"invalid_backup_location");return;}}
+        nlohmann::json estimate;
+        if(action==2){try{state->initialize();estimate=state->estimate(mount,dest);}catch(const std::exception& e){estimate={{"error",e.what()}};}}
         std::lock_guard<std::mutex> guard(state->mutex);
         if(state->requested||state->transfer_active){fail(409,"maintenance_in_progress");return;}
+        if(action==2){try{state->begin_backup(estimate);}catch(const std::exception&){fail(503,"backup_status_unavailable");return;}}
         state->mount=mount;state->destination=dest;state->result={{"state","queued"}};state->requested=action;
         res.status=202;res.set_content("{\"state\":\"queued\"}","application/json");
     });
@@ -105,13 +142,13 @@ nlohmann::json dashboard_endpoints() {
         });
     };
     add("/","Human dashboard with explorer links and maintenance controls.","HTML dashboard");
-    add("/admin/status","Latest maintenance state: idle, queued, succeeded or failed. Unavailable during maintenance; poll again after reconnecting. Result survives service restart, not process exit.",
+    add("/admin/status","Latest maintenance state: idle, queued, succeeded or failed. During backup use /admin/backup-status for durable stage, activity and logs. A minimal status listener stays available during backup.",
         {{"state","succeeded"},{"message","Server restarted."},{"version",SPARK_VERSION}});
     add("/admin/backup-locations","Up to 20 previously successful backup mount and destination pairs. Drives must be mounted before use.",
         {{"locations",json::array({{{"mount","/media/demo/drive"},{"destination","/media/demo/drive/spark-backups"}}})}});
     add("/admin/restart","Recreate REST, TCP and scheduler services within the running process. Does not reload the executable. HTTP 409 if maintenance is already queued; 403 for missing dashboard header or cross-site browser requests; 400 for invalid JSON; 415 for non-JSON content type.",
         {{"state","queued"}},true,json::object());
-    add("/admin/backup","Pause all services, run compressed verified backup, then resume even on backup failure. Omit mount and destination to save under persistent storage/.spark-backups. An explicit mount must be an external mounted filesystem; its destination defaults to mount/spark-backups. Local backups and private connection credentials are excluded from archives. HTTP 400 for invalid absolute paths or JSON, 403 for missing dashboard header or cross-site requests, 409 if busy, 415 for non-JSON content type. Poll /admin/status for completion; 202 only means accepted.",
+    add("/admin/backup","Pause ordinary services, keep authenticated backup status available, run compressed verified backup, then resume even on backup failure. Use POST /admin/backup-estimate before confirmation; space is checked again before execution. Omit mount and destination to save under persistent storage/.spark-backups. An explicit mount must be an external mounted filesystem; its destination defaults to mount/spark-backups. Local backups and private connection credentials are excluded from archives. HTTP 400 for invalid absolute paths or JSON, 403 for missing dashboard header or cross-site requests, 409 if busy, 415 for non-JSON content type. Poll /admin/status for completion; 202 only means accepted.",
         {{"state","queued"}},true,{{"mount","/media/demo/drive"},{"destination","/media/demo/drive/spark-backups"}});
     return endpoints;
 }

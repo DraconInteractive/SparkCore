@@ -11,6 +11,7 @@ class FileStore {
 public:
     explicit FileStore(DatabaseConfig config): config_(std::move(config)) {}
     void verify() const;
+    std::uint64_t database_bytes() const;
     nlohmann::json layout() const;
     void register_drives(const std::vector<std::string>& drives,const nlohmann::json& assignments, const nlohmann::json& roots, bool anchor) const;
     nlohmann::json drives() const;

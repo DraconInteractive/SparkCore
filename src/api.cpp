@@ -24,7 +24,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.36.0";
+constexpr auto api_version = "1.37.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -95,6 +95,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     for (const auto& endpoint : project_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : file_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : command_endpoints()) discovery["endpoints"].push_back(endpoint);
+    for (const auto& endpoint : backup_visibility_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : dashboard_endpoints()) discovery["endpoints"].push_back(endpoint);
     for(const auto& endpoint:browser_endpoints())discovery["endpoints"].push_back(endpoint);
     for(const auto& endpoint:inter_spark_endpoints())discovery["endpoints"].push_back(endpoint);
@@ -140,7 +141,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     if(auth)server.set_default_headers({{"Cache-Control","no-store"}});
     server.set_pre_routing_handler([endpoints,auth](const auto& request, auto& response) {
         if(auth&&!browser_public_route(request)&&!auth->request(request,response)){
-            if(response.status==401&&(request.method=="GET"||request.method=="HEAD")&&!request.has_header("Authorization")&&request.get_header_value("Accept").find("text/html")!=std::string::npos && (request.path=="/"||request.path=="/api/docs"||request.path=="/files/explorer"||request.path=="/projects/explorer"||request.path=="/commands/explorer"||request.path=="/admin/credentials/explorer")){
+            if(response.status==401&&(request.method=="GET"||request.method=="HEAD")&&!request.has_header("Authorization")&&request.get_header_value("Accept").find("text/html")!=std::string::npos && (request.path=="/"||request.path=="/api/docs"||request.path=="/files/explorer"||request.path=="/projects/explorer"||request.path=="/commands/explorer"||request.path=="/admin/credentials/explorer"||request.path=="/backups/new"||request.path=="/backups/progress"||request.path=="/backups/explorer"||request.path=="/connections/explorer")){
                 response.body.clear();response.set_redirect("/login?next="+request.path,303);
             }
             return httplib::Server::HandlerResponse::Handled;
@@ -250,6 +251,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     server.set_post_routing_handler([](const auto&,auto& response){response.set_header("X-Content-Type-Options","nosniff");response.set_header("X-Frame-Options","DENY");response.set_header("Referrer-Policy","no-referrer");response.set_header("Content-Security-Policy","default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'");});
     if(!maintenance)maintenance=std::make_shared<Maintenance>();
     configure_dashboard(server, maintenance, auth);
+    configure_backup_visibility(server,maintenance,auth);
     configure_inter_spark(server,files,maintenance,auth);
     configure_commands(server, std::make_shared<CommandStore>(DatabaseConfig::from_environment()), auth);
     configure_devices(server, std::move(registry), auth);

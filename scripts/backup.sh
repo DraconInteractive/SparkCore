@@ -175,6 +175,8 @@ incomplete=$(mktemp -d ".incomplete-spark-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")
     printf 'chunk_bytes=1073741824\ncompression=gzip\nconsistency=offline-storage-lock\n'
     printf 'scope=SPARK database tables and file storage; excludes DB accounts, custom triggers/routines/events, server configuration and binaries\n'
 } > "$incomplete/manifest.txt"
+printf 'SPARK_BACKUP_DIRECTORY %s/%s\n' "$backup_dir" "$incomplete"
+printf 'SPARK_STAGE database_export\n'
 printf 'Backing up MariaDB tables…\n'
 mariadb-dump --defaults-file="$credentials" --single-transaction --quick --hex-blob \
     --no-tablespaces --skip-lock-tables --skip-triggers --default-character-set=utf8mb4 "$db_name" \
@@ -189,9 +191,11 @@ for index in "${!drive_ids[@]}"; do
         prefix="drive-${drive_ids[index]}"
         printf '%s\t%s\n' "${drive_ids[index]}" "${normalized_dirs[index]}" >> "$incomplete/drives.tsv"
     fi
+    printf 'SPARK_STAGE compression %s\n' "${drive_ids[index]}"
     tar --create --sparse --file=- --directory="$pinned" --exclude='./.spark.lock' --exclude='./.spark-backups' --exclude='./.spark-control' . \
         | gzip -c | split --bytes=1073741824 --numeric-suffixes=0 --suffix-length=6 - "$incomplete/$prefix.tar.gz.part-"
 done
+printf 'SPARK_STAGE checksums_create\n'
 (
     cd -- "$incomplete"
     if [[ "$backup_format" == spark-backup-v2 ]]; then
@@ -201,7 +205,8 @@ done
         sha256sum -- manifest.txt database.sql.gz.part-* files.tar.gz.part-* > SHA256SUMS
     fi
 )
-"$repo_dir/scripts/verify-backup.sh" "$backup_dir/$incomplete"
+SPARK_BACKUP_PROGRESS=1 "$repo_dir/scripts/verify-backup.sh" "$backup_dir/$incomplete"
+printf 'SPARK_STAGE finalizing\n'
 # Flush the mounted filesystem before publishing the completed directory name.
 sync -f .
 complete=${incomplete#.incomplete-}

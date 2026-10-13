@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Two isolated SPARK instances; real HTTPS, backup creation and verified transfers."""
-import gzip,json,os,socket,subprocess,tempfile,time,urllib.request,urllib.error,tarfile,io
+import gzip,json,os,signal,socket,subprocess,tempfile,time,urllib.request,urllib.error,tarfile,io
 from pathlib import Path
 from remote_proxy import RemoteProxy,free_port
 assert os.environ.get('SPARK_DB_NAME','').startswith('spark_test_')
@@ -55,8 +55,37 @@ try:
         created=local('/connections','POST',connection,201);cid=created['id'];assert 'token' not in created and created['permissions']==['files.read','files.write']
         assert b['device']['token'] not in json.dumps(local('/connections'))
         assert (a['folder']/'files/.spark-control/connections.json').stat().st_mode&0o777==0o600
+        # Metadata estimates account for sparse data and exclude old backups/control files.
+        sparse=a['folder']/'files/estimate-sparse';
+        with sparse.open('wb') as f:f.seek(128*1024*1024);f.write(b'end')
+        (a['folder']/'files/estimate-random').write_bytes(os.urandom(16*1024*1024))
+        estimate=local('/admin/backup-estimate','POST',{})
+        assert estimate['source_logical_bytes']>estimate['source_data_bytes']+100*1024*1024
+        assert estimate['duration_seconds'] is None and estimate['space_sufficient']
+        local('/admin/backup-estimate','POST',{},403,token=a['reader'])
+        local('/admin/backup-status',status=403,token=a['reader'])
         local('/admin/backup','POST',{},202)
+        active=wait(lambda: (lambda p:p if p.get('process_alive') and p['state']=='running' else None)(local('/admin/backup-status')))
+        backup_pid=active['process_id'];os.kill(backup_pid,signal.SIGSTOP)
+        try:
+            assert local('/health',status=503)['error']=='maintenance_in_progress'
+            assert local('/admin/backup-status')['process_alive']
+            local('/admin/backup-status',status=403,token=a['reader'])
+            call(a['port'],'/admin/backup-status',status=401)
+            req=urllib.request.Request(f"http://127.0.0.1:{a['port']}/health",headers={'Authorization':'Bearer '+a['admin']})
+            try:urllib.request.urlopen(req);raise AssertionError('ordinary route available during maintenance')
+            except urllib.error.HTTPError as e:assert e.code==503 and e.headers['Retry-After']=='5'
+        finally:os.kill(backup_pid,signal.SIGCONT)
         wait(lambda: local('/admin/status')['state']=='succeeded')
+        def ready():
+            try:return local('/health')=={'status':'ok'}
+            except AssertionError:return False
+        wait(ready)
+        status=local('/admin/backup-status');assert status['state']=='succeeded' and not status['process_alive']
+        assert status['output_bytes']>0 and status['verified_files']>0 and 'Backup complete:' in status['log_tail']
+        assert Path(status['log_path']).read_text().find('SPARK_STAGE')>=0
+        assert local('/admin/backup-estimate','POST',{})['duration_seconds'] is not None
+
         backups=local('/backups')['backups'];assert len(backups)==1,backups
         first=backups[0]['id'];source=a['folder']/'files/.spark-backups'/first
         subprocess.run(['./scripts/verify-backup.sh',str(source)],check=True,stdout=subprocess.DEVNULL)
@@ -86,10 +115,39 @@ try:
         jid=job({'action':'move','drive':drive});assert wait(lambda:completed(jid))['state']=='succeeded';assert not source.exists()
         local('/backups/'+first,'DELETE',status=404)
         # A new local backup excludes previous backup archives on every drive.
-        local('/admin/backup','POST',{},202);wait(lambda:local('/admin/status')['state']=='succeeded')
+        local('/admin/backup','POST',{},202);wait(lambda:local('/admin/status')['state']=='succeeded');wait(ready)
         second=local('/backups')['backups'][0]['id'];local('/backups/'+second,'DELETE',status=204);assert not local('/backups')['backups']
         local('/connections/'+cid,'DELETE',status=204);assert not local('/connections')['connections']
-        print('Local backup exclusion, two-instance HTTPS verification, permissions, idempotent send, retry, drive copy/move and deletion passed.')
+        # The real TLS proxy remains usable during B's backup, including fresh login and CSRF.
+        call(b['port'],'/admin/backup','POST',{},b['admin'],202)
+        active=wait(lambda:(lambda p:p if p.get('process_alive') and p['state']=='running' else None)(call(b['port'],'/admin/backup-status',token=b['admin'])))
+        os.kill(active['process_id'],signal.SIGSTOP)
+        def https(method,path,body=None,headers=None,status=200):
+            c=proxy.connection();c.request(method,path,json.dumps(body) if body is not None else None,{'Content-Type':'application/json','Origin':proxy.origin,**(headers or {})});r=c.getresponse();data=r.read();h=dict(r.getheaders());c.close();assert r.status==status,(path,r.status,data[:200]);assert h.get('Strict-Transport-Security')=='max-age=31536000';return data,h
+        try:
+            data,h=https('POST','/auth/login',{'token':b['admin']},{'X-SPARK-Login':'1'})
+            session=json.loads(data);cookie=h['Set-Cookie'].split(';')[0]
+            https('GET','/backups/progress',headers={'Cookie':cookie})
+            data,_=https('GET','/admin/backup-status',headers={'Cookie':cookie});assert json.loads(data)['state']=='running'
+            _,h=https('GET','/files',headers={'Cookie':cookie},status=503);assert h['Retry-After']=='5'
+            https('POST','/auth/logout',{},headers={'Cookie':cookie},status=403)
+            https('POST','/auth/logout',{},headers={'Cookie':cookie,'X-SPARK-CSRF':session['csrf_token'],'Origin':'https://wrong.example'},status=403)
+        finally:os.kill(active['process_id'],signal.SIGCONT)
+        wait(lambda:call(b['port'],'/admin/backup-status',token=b['admin'])['state']=='succeeded')
+        def b_ready():
+            try:return call(b['port'],'/health',token=b['admin'])=={'status':'ok'}
+            except AssertionError:return False
+        wait(b_ready)
+        https('GET','/admin/backup-status',headers={'Cookie':cookie})
+        https('POST','/auth/logout',{},headers={'Cookie':cookie,'X-SPARK-CSRF':session['csrf_token']},status=204)
+        https('GET','/admin/backup-status',headers={'Cookie':cookie},status=401)
+        processes[0].terminate();processes[0].wait(timeout=10)
+        status_path=a['folder']/'files/.spark-control/backup-status.json'
+        saved=json.loads(status_path.read_text());saved['state']='running';saved.pop('finished_at',None);status_path.write_text(json.dumps(saved))
+        processes[0]=subprocess.Popen(['./build/spark_server','--config',str(a['config'])],env=env,stdout=log,stderr=log)
+        wait(ready)
+        assert local('/admin/backup-status')['state']=='interrupted'
+        print('Backup estimates, live maintenance visibility, TLS login/CSRF, interrupted recovery, exclusion, verified transfers, retry and drive copy/move passed.')
 except BaseException:
     # Server output intentionally excludes credentials.
     raise

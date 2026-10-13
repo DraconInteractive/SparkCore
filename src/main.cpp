@@ -47,6 +47,7 @@ int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Mainten
         spark::ProjectStore(spark::DatabaseConfig::from_environment()).verify();
         spark::BoardStore(spark::DatabaseConfig::from_environment()).verify();
         files->initialize();
+        try{maintenance->initialize();}catch(const std::exception& e){std::cerr<<"Backup visibility unavailable: "<<e.what()<<std::endl;}
         spark::configure_api(server, std::move(store), timers, notification_port, pulse, calendar, tasks, files, maintenance, auth, config.public_notifications());
     } catch (const std::exception& error) {
         std::cerr << "Startup check failed: " << error.what() << '\n';
@@ -120,8 +121,10 @@ int main(int argc, char** argv) {
         if (!maintenance->requested) return result;
         // All HTTP handlers, schedulers, TCP clients and storage locks are now gone.
         try {
-            maintenance->execute();
+            if(maintenance->requested==2)spark::run_maintenance_listener(config.host,config.port,maintenance,auth);
+            else maintenance->execute();
         } catch (const std::exception& error) {
+            try{maintenance->progress({{"state","failed"},{"message",error.what()},{"finished_at",time(nullptr)},{"process_alive",false}});}catch(...){}
             std::lock_guard<std::mutex> guard(maintenance->mutex);
             maintenance->result = {{"state", "failed"}, {"message", std::string("Maintenance failed: ") + error.what()}};
             maintenance->requested = 0;

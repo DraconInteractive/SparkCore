@@ -25,6 +25,8 @@ const std::vector<RoutePolicy>& route_policies(){
             auto pattern=std::regex_replace(path,std::regex(R"(\{[^}]+\})"),"([^/]+)");
             out.push_back({method,path,std::move(permissions),std::regex(pattern),own});
         };
+        for(auto path:{"/backups/new","/backups/progress","/admin/backup-status"})add("GET",path,{"admin.backup"});
+        add("POST","/admin/backup-estimate",{"admin.backup"});
         add("POST","/auth/verify",{});
         for(auto path:{"/backups","/backups/explorer","/backups/drives","/backups/jobs","/backups/{id}/files/{name}"})add("GET",path,{"admin.backup"});
         add("DELETE","/backups/{id}",{"admin.backup"});add("POST","/backups/{id}/transfers",{"admin.backup"});add("POST","/backups/jobs/{id}/retry",{"admin.backup"});

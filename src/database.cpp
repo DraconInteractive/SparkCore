@@ -710,6 +710,9 @@ namespace spark {
 namespace {
 const std::string file_projection = "JSON_OBJECT('id',id,'name',name,'directory',directory,'size_bytes',size_bytes,'content_revision',CONVERT(content_revision USING utf8mb4),'drive_id',drive_id,'drive_letter',(SELECT letter FROM storage_drives WHERE storage_drives.id=files.drive_id),'content_type','application/octet-stream','download_url',CONCAT('/files/',id,'/content'),'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
 }
+std::uint64_t FileStore::database_bytes() const {
+    Connection c(config_);Statement q(c,"SELECT JSON_ARRAY(COALESCE(SUM(DATA_LENGTH+INDEX_LENGTH),0)) FROM information_schema.TABLES WHERE TABLE_SCHEMA=?",{config_.database});q.execute();return q.rows()[0][0].get<std::uint64_t>();
+}
 void FileStore::verify() const {
     Connection c(config_);
     { Statement q(c,"SELECT "+file_projection+",state FROM files LIMIT 0"); q.execute(); }

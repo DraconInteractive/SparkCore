@@ -507,3 +507,8 @@ an attached drive, send them to another SPARK, or delete local copies. Register
 remote credentials in `/connections/explorer` (`admin.connections` required).
 See [backup and connection setup](docs/backups.md). Outbound HTTPS transfers require
 `curl` and CA certificates. No database migration is required for this feature.
+
+Backup creation now opens `/backups/new` for a size/free-space estimate and explicit
+confirmation. `/backups/progress` remains available during the offline snapshot;
+ordinary REST requests return 503 with Retry-After. Live logs and interrupted state
+are persisted. Existing `admin.backup` credentials suffice; no migration is needed.

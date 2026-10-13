@@ -41,9 +41,12 @@ while IFS= read -r line; do
     index=$((index+1))
 done < SHA256SUMS
 [[ $index == ${#expected[@]} ]] || fail 'Not all archive members are checksummed.'
+[[ ${SPARK_BACKUP_PROGRESS:-0} != 1 ]] || printf 'SPARK_STAGE checksums_verify\n'
 sha256sum --check --strict SHA256SUMS
+[[ ${SPARK_BACKUP_PROGRESS:-0} != 1 ]] || printf 'SPARK_STAGE database_verify\n'
 cat -- "${database_parts[@]}" | gzip -t
 for prefix in "${prefixes[@]}"; do
+    [[ ${SPARK_BACKUP_PROGRESS:-0} != 1 ]] || printf 'SPARK_STAGE archive_verify %s\n' "$prefix"
     parts=("$prefix".tar.gz.part-*)
     cat -- "${parts[@]}" | gzip -dc | tar --list --file=- >/dev/null
     if [[ "$format" == format=spark-backup-v2 ]]; then

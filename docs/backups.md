@@ -224,10 +224,9 @@ already be mounted and writable by the server's OS account.
 
 SPARK returns HTTP 202, drains HTTP requests, stops its TCP notification service
 and schedulers, releases the storage lock, runs `scripts/backup.sh`, and starts
-its services again even if the backup fails. REST and TCP are unavailable during
-this interval. Leave the page open: it reconnects automatically and displays the
-result. The latest result is held in memory; completed archives and successful
-location history persist on disk. No other process should write to the database
+its services again even if the backup fails. Ordinary REST returns 503 and TCP is paused during
+this interval. The authenticated backup progress page remains available. Backup
+status, live logs, completed archives and successful location history persist on disk. No other process should write to the database
 or storage during backup. Configuration and database credentials come from the
 running server environment. Every registered storage root (including runtime additions) is passed to the backup
 script; dashboard backups include all drives automatically.
@@ -260,8 +259,8 @@ backup on the persistent drive in `.spark-backups`. An explicit `mount` and opti
 `scripts/backup.sh --local`; `--choose` still selects an external location.
 All registered source drives must be available for a complete backup.
 
-Backup creation still pauses REST and TCP to obtain the existing offline-consistent
-snapshot. The dashboard/viewer reconnects afterwards. Transfers are separate
+Backup creation pauses ordinary REST and TCP to obtain the existing offline-consistent
+snapshot. An authenticated maintenance page remains available; see visibility below. Transfers are separate
 background jobs and leave ordinary services running. A local copy does not protect
 against loss of the persistent drive; use Copy or Send for another physical copy.
 
@@ -330,3 +329,54 @@ selected drive. A downloads each uploaded member as a stream and verifies SHA-25
 shared files on B and can be downloaded through its file explorer. Connection
 credentials, jobs, and source-instance identity remain separate from calendar sync
 or other future connection uses.
+
+## Estimates, confirmation and live visibility (API 1.37.0)
+
+Both the dashboard and backup catalog now open `/backups/new`. Select a local or
+external destination, choose **Estimate backup**, review the results, and select
+**Confirm and start backup**. Changing the destination invalidates the estimate.
+API clients may continue submitting directly to `POST /admin/backup`; preflight
+space checks are repeated before the child backup process starts.
+
+`POST /admin/backup-estimate` accepts the same optional `mount`/`destination` fields.
+It returns per-drive logical and allocated data sizes, file counts, approximate
+MariaDB table/index bytes, destination free space, a compressed-size range and a
+conservative space reserve. Sparse holes are excluded from allocated data; existing
+backups and private control data are excluded. Database size and compression are
+estimates, not guarantees. No file contents are read for compression sampling.
+
+The first duration estimate is `null` (displayed as **Not yet known**). Successful
+backups record source/output sizes and elapsed time including verification; later
+estimates provide a range based on the latest measurement. Different contents,
+CPU load and destination hardware can change actual results. Transfer time is
+separate. Historical stage durations are also retained for diagnosis.
+
+During backup, SPARK releases its ordinary services and storage locks, then runs a
+small HTTP maintenance listener at the same configured address and port. Existing
+HTTPS proxies and browser sessions continue working. There can be a brief reconnect
+at each listener handover. The maintenance listener serves `/backups/progress`,
+`GET /admin/backup-status`, login/session routes, and legacy `/admin/status`.
+Authorized ordinary REST requests receive `503 maintenance_in_progress` with
+`Retry-After: 5`; TCP notifications remain paused. No domain handlers or schedulers
+run during the offline snapshot. Normal operation returns after backup finishes.
+
+The progress page shows stage (export, per-drive compression, checksums, archive
+verification, finalization), elapsed time, heartbeat, process liveness, observed
+activity, output size, checksummed-file count, and a bounded live log tail. Activity
+is inferred from backup-process/descendant CPU counters and archive growth; liveness
+or CPU activity alone does not prove useful progress. A quiet interval is reported
+as **no activity observed**, not automatically treated as a failed backup.
+
+All new pages and APIs require `admin.backup` in token mode. The maintenance listener
+uses the same identity provider, browser sessions, CSRF rules and security headers.
+Status/logs are not public. Ordinary endpoint permissions are still checked before
+returning maintenance responses.
+
+Progress is persisted atomically at least once per observation interval (about one
+second) in the persistent drive's `.spark-control/backup-status.json`. Each backup
+has an owner-only `backup-{id}.log`, and output is also streamed to the running
+terminal/tmux session. The JSON includes `log_path` for manual inspection with
+`tail -f`. A server restart marks an unfinished status **interrupted**. This does
+not automatically remove or resume its incomplete archive. Timing history is in
+`.spark-control/backup-history.json`; control files remain excluded from backups.
+Logs are retained for diagnosis; there is no automatic log rotation in this version.
