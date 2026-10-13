@@ -438,6 +438,25 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
         }catch(const std::invalid_argument& error){failure(response,std::string(error.what())=="drive_not_found"?404:409,error.what());}
         catch(const DatabaseError&){failure(response,503,"database_unavailable");}catch(const std::exception&){failure(response,503,"storage_unavailable");}
     };
+    auto change_directory=[storage](const httplib::Request& request,httplib::Response& response){
+        if(!request.params.empty()){failure(response,400,"invalid_parameters");return;}
+        const auto type=request.get_header_value("Content-Type");if(type.substr(0,type.find(';'))!="application/json"){failure(response,415,"unsupported_media_type");return;}
+        auto packet=json::parse(request.body,nullptr,false);const bool move=request.method=="PATCH";
+        if(!packet.is_object()){failure(response,400,"invalid_packet");return;}
+        for(const auto& item:packet.items())if(item.key()!="drive"&&item.key()!="directory"&&item.key()!=(move?"destination":"recursive")){failure(response,400,"unknown_field");return;}
+        if(!packet.contains("directory")||!packet["directory"].is_string()||!valid_directory(packet["directory"])||(packet.contains("drive")&&!packet["drive"].is_string())){failure(response,400,"invalid_directory");return;}
+        if(move&&(!packet.contains("destination")||!packet["destination"].is_string()||!valid_directory(packet["destination"]))){failure(response,400,"invalid_destination");return;}
+        if(!move&&packet.contains("recursive")&&!packet["recursive"].is_boolean()){failure(response,400,"invalid_recursive");return;}
+        try{
+            std::unique_lock<std::shared_mutex> gate(storage->project_gate);storage->initialize();
+            auto drive=packet.contains("drive")?storage->resolve_drive(packet["drive"]):storage->store->default_drive();storage->require_drive_online(drive);
+            auto ids=storage->store->change_directory(drive,packet["directory"],move?std::optional<std::string>(packet["destination"].get<std::string>()):std::nullopt,packet.value("recursive",false));
+            if(move)reply(response,200,{{"drive_id",drive},{"directory",packet["destination"]}});
+            else{for(const auto& id:ids){storage->erase_bytes(id.get<std::string>());storage->store->forget(id);}response.status=204;}
+        }catch(const std::invalid_argument& e){std::string code=e.what();failure(response,code=="directory_not_found"||code=="drive_not_found"?404:code=="directory_too_long"||code=="invalid_destination"?400:409,code.c_str());}
+        catch(const DatabaseError&){failure(response,503,"database_unavailable");}catch(const std::exception&){failure(response,503,"storage_unavailable");}
+    };
+    body_route(server,"PATCH","/files/directories",change_directory,auth);body_route(server,"DELETE","/files/directories",change_directory,auth);
     server.Get("/files/directories",directories);body_route(server,"POST","/files/directories",directories,auth);
     body_route(server,"PATCH",R"(/files/([^/]+))",handler,auth);
     server.Get("/files",handler);server.Get(R"(/files/([^/]+))",handler);server.Get(R"(/files/([^/]+)/content)",handler);
@@ -457,6 +476,11 @@ json file_endpoints(){
                 {"body",remove?json(nullptr):download?json("Current file bytes (206 for a valid range)"):list?json{{"files",json::array({file})},{"limit",100},{"offset",0},{"has_more",false}}:file}}},
             {"errors",{{"400","invalid_directory, invalid_filename, invalid_parameters, invalid_pagination, invalid_file_id, incomplete_upload"},{"404","file_not_found, drive_not_found"},{"409","drive_required"},{"411","length_required"},{"415","unsupported_media_type, unsupported_content_encoding"},{"416","unsatisfiable byte range"},{"503","database_unavailable, storage_unavailable"},{"507","insufficient_storage"}}}});
     }
+    for(bool move:{true,false})endpoints.push_back({{"method",move?"PATCH":"DELETE"},{"path","/files/directories"},
+        {"description",move?"Rename or move a directory and descendants atomically on the same online drive. Missing parents created; file IDs and download URLs unchanged. Reject collisions, root, moves into self, and folders containing project roots. Emits files.directories_updated and file.updated.":"Delete an empty directory, or explicitly set recursive=true to delete all descendants and files. Reject root and folders containing project roots. Requires online drive. Emits files.directories_updated and file.deleted. Interrupted byte cleanup resumes on restart; open downloads may finish."},
+        {"input",{{"headers",{{"Content-Type","application/json"}}},{"body",move?json{{"drive","A"},{"directory","/notes"},{"destination","/archive/notes"}}:json{{"drive","A"},{"directory","/notes"},{"recursive",false}}},{"validation","drive optional, defaults to persistent drive; absolute logical paths, max 1024 UTF-8 bytes; recursive defaults false"}}},
+        {"output",{{"status",move?200:204},{"body",move?json{{"drive_id","drive identifier"},{"directory","/archive/notes"}}:json(nullptr)}}},
+        {"errors",{{"400","invalid_packet, unknown_field, invalid_parameters, invalid_directory, invalid_destination, invalid_recursive, directory_too_long"},{"404","directory_not_found, drive_not_found"},{"409","directory_conflict, directory_not_empty, directory_in_use, directory_root_protected"},{"415","unsupported_media_type"},{"503","database_unavailable, storage_unavailable; deletion may already be committed"}}}});
     const std::string rule="Absolute logical directory: / or /folder/subfolder. Case-sensitive UTF-8, max 1024 bytes total and 255 per component; no empty components, trailing slash, dot/dot-dot, backslashes or control characters. Not a server filesystem path.";
     for(const std::string op:{"move","directories","mkdir","explorer"}){
         bool move=op=="move",mkdir=op=="mkdir",html=op=="explorer",write=move||mkdir;

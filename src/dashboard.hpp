@@ -10,6 +10,7 @@ struct Maintenance {
     std::mutex mutex;
     std::atomic<int> requested{0}; // 1 restart, 2 backup
     std::string mount, destination;
+    std::atomic<bool> transfer_active{false};
     nlohmann::json result = {{"state","idle"}};
     void execute();
 };

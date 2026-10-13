@@ -201,3 +201,5 @@ To rotate a device token, issue another for the same device ID, switch the devic
 then revoke the old credential. Revocation applies to REST and live/replayed TCP
 through the shared provider. No database migration is required. The running OS
 user must be able to write the private credential file and its parent directory.
+
+`admin.connections` manages saved remote SPARK credentials and authorizes using them for backup sends. Backup catalog, download, copy/move and deletion require `admin.backup`. `/auth/verify` reports only the authenticated device token’s own permissions and requires no additional grant.

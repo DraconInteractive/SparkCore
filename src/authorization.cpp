@@ -25,6 +25,11 @@ const std::vector<RoutePolicy>& route_policies(){
             auto pattern=std::regex_replace(path,std::regex(R"(\{[^}]+\})"),"([^/]+)");
             out.push_back({method,path,std::move(permissions),std::regex(pattern),own});
         };
+        add("POST","/auth/verify",{});
+        for(auto path:{"/backups","/backups/explorer","/backups/drives","/backups/jobs","/backups/{id}/files/{name}"})add("GET",path,{"admin.backup"});
+        add("DELETE","/backups/{id}",{"admin.backup"});add("POST","/backups/{id}/transfers",{"admin.backup"});add("POST","/backups/jobs/{id}/retry",{"admin.backup"});
+        for(auto path:{"/connections","/connections/explorer"})add("GET",path,{"admin.connections"});
+        add("POST","/connections",{"admin.connections"});add("PATCH","/connections/{id}",{"admin.connections"});add("DELETE","/connections/{id}",{"admin.connections"});add("POST","/connections/{id}/test",{"admin.connections"});
         for(auto path:{"/","/health","/version","/api","/api/docs"})add("GET",path,{"discovery.read"});
         for(auto path:{"/admin/credentials","/admin/credentials/explorer"})add("GET",path,{"admin.credentials"});
         add("POST","/admin/credentials",{"admin.credentials"});
@@ -52,6 +57,7 @@ const std::vector<RoutePolicy>& route_policies(){
         for(auto path:{"/files","/files/explorer","/files/drives","/files/directories","/files/{id}","/files/{id}/content"})add("GET",path,{"files.read"});
         add("POST","/files/drives",{"admin.storage"});add("DELETE","/files/drives/{letter}",{"admin.storage"});
         for(auto path:{"/files","/files/directories"})add("POST",path,{"files.write"});
+        for(auto method:{"PATCH","DELETE"})add(method,"/files/directories",{"files.write"});
         add("PUT","/files/{id}/content",{"files.write"});add("PATCH","/files/{id}",{"files.write"});add("DELETE","/files/{id}",{"files.write"});
         for(auto path:{"/projects","/projects/explorer","/projects/{id}"})add("GET",path,{"projects.read"});
         add("POST","/projects",{"projects.write","files.write"});add("PATCH","/projects/{id}",{"projects.write"});
@@ -84,6 +90,7 @@ bool Authorization::body(const httplib::Request& req,httplib::Response& res)cons
     // their validation responsibility; no handler mutates from an invalid packet.
     auto packet=nlohmann::json::parse(req.body,nullptr,false);
     if(!packet.is_object())return true;
+    if(req.path.rfind("/connections",0)==0)return true;
     for(auto field:{"source_device","device_id"})if(packet.contains(field)&&!packet[field].is_null()){
         if(!packet[field].is_string()||!acts_as(*identity,packet[field].get<std::string>()))return deny(res,403,"device_identity_mismatch");
     }

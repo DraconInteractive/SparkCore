@@ -129,8 +129,8 @@ async def exercise_firefox(profile,admin,root):
                 result=await command('script.evaluate',{'expression':expression,'target':{'context':context},'awaitPromise':True})
                 assert result['type']=='success',result
                 return result.get('result',{}).get('value')
-            async def wait(expression):
-                for _ in range(100):
+            async def wait(expression,timeout=10):
+                for _ in range(int(timeout*10)):
                     if await evaluate(expression):return
                     await asyncio.sleep(.1)
                 raise AssertionError('Browser condition timed out: '+expression)
@@ -163,6 +163,28 @@ async def exercise_firefox(profile,admin,root):
             await wait("document.getElementById('text-status').textContent==='Saved to shared storage.'")
             data=await evaluate("fetch('/files').then(r=>r.json()).then(async p=>{const f=p.files.find(x=>x.name==='browser-upload.txt');return await (await fetch(f.download_url)).text();})")
             assert data=='edited in browser',data
+            await evaluate("document.getElementById('detail-close').click();document.getElementById('mkdir').click();document.getElementById('destination').value='/browser-folder';document.getElementById('edit-form').requestSubmit();true")
+            await wait("!busy && directories.includes('/browser-folder')")
+            await evaluate("Array.from(document.querySelectorAll('#rows tr')).find(r=>r.textContent.includes('browser-folder')).querySelector('button').click();document.getElementById('destination').value='/browser-renamed';document.getElementById('edit-form').requestSubmit();true")
+            await wait("!busy && directories.includes('/browser-renamed') && !directories.includes('/browser-folder')")
+            await evaluate("Array.from(document.querySelectorAll('#rows tr')).find(r=>r.textContent.includes('browser-renamed')).querySelectorAll('button')[1].click();document.getElementById('edit-form').requestSubmit();true")
+            await wait("!busy && !directories.includes('/browser-renamed')")
+            await navigate('/connections/explorer')
+            await wait("document.getElementById('title').textContent==='SPARK connections'")
+            await evaluate("document.getElementById('new').click();true")
+            await wait("document.getElementById('dialog').open")
+            await evaluate("const f=document.getElementById('form');f.elements.name.value='Invalid HTTP';f.elements.url.value='http://localhost';f.elements.device_id.value='spark-a';f.elements.token.value='spark1_'+'a'.repeat(64);f.requestSubmit();true")
+            await wait("document.getElementById('error').textContent==='https_origin_required'")
+            await evaluate("document.getElementById('cancel').click();true")
+            assert await evaluate("document.querySelector('input[type=password]').value===''")
+            await navigate('/backups/explorer')
+            await wait("document.getElementById('title').textContent==='Local backups'")
+            await evaluate("document.getElementById('new').click();true")
+            await wait("document.getElementById('dialog').open")
+            await evaluate("document.getElementById('form').requestSubmit();true")
+            await wait("document.querySelectorAll('#rows article').length===1",timeout=60)
+            await evaluate("window.confirm=()=>true;Array.from(document.querySelectorAll('#rows button')).find(b=>b.textContent==='Delete').click();true")
+            await wait("document.querySelectorAll('#rows article').length===0")
             await navigate('/projects/explorer');await wait("!!window.sparkSession")
             assert await evaluate("sparkSession.ready.then(s=>s.subject)")=='owner'
             await navigate('/commands/explorer');await wait("document.getElementById('devices').textContent.includes('browser-executor')")

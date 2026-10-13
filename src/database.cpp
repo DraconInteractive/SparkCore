@@ -740,6 +740,32 @@ json FileStore::directories(const std::optional<std::string>& drive) const {
     const auto selected=drive?*drive:default_drive();
     Connection c(config_);Statement q(c,"SELECT JSON_QUOTE(CONVERT(path USING utf8mb4)) FROM file_directories WHERE drive_id=? ORDER BY path",{selected});q.execute();return {{"drive_id",selected},{"directories",q.rows()}};
 }
+json FileStore::change_directory(const std::string& drive,const std::string& directory,const std::optional<std::string>& destination,bool recursive) const {
+    if(directory=="/")throw std::invalid_argument("directory_root_protected");
+    const auto prefix=directory+"/";
+    if(destination && (*destination==directory || destination->rfind(prefix,0)==0))throw std::invalid_argument("invalid_destination");
+    Connection c(config_);Transaction tx(c);
+    Statement all(c,"SELECT JSON_QUOTE(CONVERT(path USING utf8mb4)) FROM file_directories WHERE drive_id=? FOR UPDATE",{drive});all.execute();auto paths=all.rows();
+    bool found=false;json affected=json::array();
+    for(const auto& item:paths){auto path=item.get<std::string>();if(path==directory)found=true;if(path==directory||path.rfind(prefix,0)==0)affected.push_back(path);if(destination&&path==*destination)throw std::invalid_argument("directory_conflict");}
+    if(!found)throw std::invalid_argument("directory_not_found");
+    Statement projects(c,"SELECT JSON_QUOTE(CONVERT(directory USING utf8mb4)) FROM projects WHERE drive_id=? FOR UPDATE",{drive});projects.execute();
+    for(const auto& item:projects.rows()){auto path=item.get<std::string>();if(path==directory||path.rfind(prefix,0)==0)throw std::invalid_argument("directory_in_use");}
+    const std::string match="drive_id=? AND (BINARY directory=BINARY ? OR LEFT(BINARY directory,OCTET_LENGTH(?))=BINARY ?)";
+    Statement read(c,"SELECT JSON_OBJECT('id',id,'state',state) FROM files WHERE "+match+" FOR UPDATE",{drive,directory,prefix,prefix});read.execute();auto files=read.rows();
+    if(!destination&&!recursive&&(affected.size()>1||!files.empty()))throw std::invalid_argument("directory_not_empty");
+    if(destination){
+        for(const auto& item:affected){auto path=*destination+item.get<std::string>().substr(directory.size());if(path.size()>1024)throw std::invalid_argument("directory_too_long");}
+        auto parent=destination->substr(0,destination->find_last_of('/'));ensure_directories(c,parent.empty()?"/":parent,drive);
+        for(const auto& item:affected){auto old=item.get<std::string>();Statement update(c,"UPDATE file_directories SET path=? WHERE drive_id=? AND path=?",{*destination+old.substr(directory.size()),drive,old});update.execute();}
+        Statement update(c,"UPDATE files SET directory=CONCAT(?,SUBSTRING(BINARY directory,?)) WHERE "+match,{*destination,std::to_string(directory.size()+1),drive,directory,prefix,prefix});update.execute();
+    }else{
+        Statement mark(c,"UPDATE files SET state='deleting' WHERE "+match,{drive,directory,prefix,prefix});mark.execute();
+        for(const auto& item:affected){Statement remove(c,"DELETE FROM file_directories WHERE drive_id=? AND path=?",{drive,item.get<std::string>()});remove.execute();}
+    }
+    json ids=json::array();for(const auto& file:files){ids.push_back(file["id"]);if(file["state"]=="ready")append_event(c,destination?"file.updated":"file.deleted","/files/"+file["id"].get<std::string>(),nullptr,json::object());}
+    append_event(c,"files.directories_updated","/files/directories",nullptr,{{"drive_id",drive}});tx.commit();return ids;
+}
 std::optional<json> FileStore::move(const std::string& id,const std::string& directory) const {
     Connection c(config_);Transaction tx(c);
     Statement read(c,"SELECT "+file_projection+" FROM files WHERE id=? AND state='ready' FOR UPDATE",{id});read.execute();auto rows=read.rows();if(rows.empty())return std::nullopt;

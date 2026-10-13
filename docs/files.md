@@ -302,3 +302,32 @@ Migration 018 assigns existing global folders and projects to persistent storage
 Already assigned file locations are preserved; the migration never moves or
 relabels physical blobs on another drive. Backups include the new directory and
 project ownership through their normal database dump.
+
+## Rename and delete folders (API 1.35.0)
+
+`PATCH /files/directories` accepts JSON such as
+`{"drive":"A","directory":"/notes","destination":"/archive/notes"}`.
+It moves the entire logical subtree on the same drive, creating missing destination
+parents. File IDs, content and download URLs stay unchanged. The destination must
+not exist or be inside the source. Paths are case-sensitive and limited to 1024
+UTF-8 bytes, including each resulting descendant path.
+
+`DELETE /files/directories` accepts
+`{"drive":"A","directory":"/notes","recursive":false}` and returns 204.
+Nonempty folders return 409 `directory_not_empty`; explicitly use `recursive:true`
+to permanently delete their files and subfolders. The drive root is protected.
+Both operations require `files.write` and an online drive; omitted `drive` selects
+the persistent drive. Missing folders return 404 `directory_not_found`.
+
+Folders that are project roots or contain project roots return 409
+`directory_in_use`. Ordinary folders inside projects can be managed normally.
+To delete a project and its directory, use the project deletion endpoint instead.
+
+Metadata and notifications commit together. Clients receive
+`files.directories_updated` with `drive_id`, plus `file.updated` or `file.deleted`
+for affected completed files. Deletion byte cleanup resumes on restart if interrupted;
+a 503 during cleanup can mean metadata deletion has already committed.
+Already-open downloads may finish. Folder mutations wait for active file transfers.
+
+In `/files/explorer`, each folder row offers **Rename / Move** and **Delete**.
+Deletion defaults to empty folders; a checkbox explicitly enables deleting contents.

@@ -10,10 +10,12 @@ file_dir=${SPARK_FILE_DIR:-$repo_dir/storage/files}
 history_file=${SPARK_BACKUP_HISTORY:-$repo_dir/storage/backup-locations.tsv}
 file_dirs=()
 choose=0
+local_backup=0
 usage() {
     cat <<'HELP'
 Usage: scripts/backup.sh [--choose | --mount DRIVE_MOUNT] [--destination DIRECTORY] [--file-dir DIRECTORY ...]
-Without a mount in an interactive terminal, choose a previous location or enter a new one.
+Without a mount, store on the persistent (first supplied) drive under .spark-backups.
+--local explicitly selects persistent storage; --choose selects an external location.
 --choose always opens the selector, overriding mount/destination environment defaults.
 Stop SPARK first; leave MariaDB running. Uses SPARK_DB_* environment settings.
 The drive must already be mounted. Destination defaults to DRIVE_MOUNT/spark-backups.
@@ -30,6 +32,7 @@ while (($#)); do
             (($#>=2)) || fail "Missing value for $1"
             case "$1" in --mount) backup_mount=$2;; --destination) backup_dir=$2;; --file-dir) file_dirs+=("$2");; esac
             shift 2;;
+        --local) local_backup=1; backup_mount=; backup_dir=; shift;;
         --choose) choose=1; shift;;
         --help|-h) usage; exit 0;;
         *) fail "Unknown option: $1";;
@@ -69,8 +72,8 @@ choose_location() {
         IFS= read -r backup_dir || fail 'Location selection cancelled.'
     fi
 }
-if ((choose)) || { [[ -z "$backup_mount" ]] && [[ -t 0 ]]; }; then choose_location; fi
-[[ -n "$backup_mount" ]] || fail 'Specify --mount, SPARK_BACKUP_MOUNT, or run interactively to choose a location.'
+if ((choose)); then choose_location; fi
+if [[ -z "$backup_mount" ]]; then local_backup=1; fi
 if ((${#file_dirs[@]}==0)); then
     [[ -z "${SPARK_FILE_DRIVES:-}" ]] || fail 'Pass every runtime drive explicitly with repeated --file-dir options.'
     file_dirs=("$file_dir")
@@ -78,19 +81,27 @@ fi
 for value in "$backup_mount" "$backup_dir" "${file_dirs[@]}"; do
     [[ "$value" != *$'\t'* && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail 'Paths cannot contain tabs or newlines.'
 done
-backup_mount=$(realpath -e -- "$backup_mount") || fail 'Backup mount does not exist.'
-[[ "$backup_mount" != / ]] || fail 'The root filesystem is not a backup drive.'
-mountpoint -q -- "$backup_mount" || fail 'Backup drive is not mounted; refusing to write to the internal disk.'
-backup_dir=$(realpath -m -- "${backup_dir:-$backup_mount/spark-backups}")
-[[ "$backup_dir" == "$backup_mount/"* ]] || fail 'Destination must be inside the specified mounted drive.'
+if ((local_backup)); then
+    [[ -z "$backup_mount" && -z "$backup_dir" ]] || fail 'Local backup does not accept an external mount or destination.'
+    backup_mount=$(realpath -e -- "${file_dirs[0]}")
+    backup_dir="$backup_mount/.spark-backups"
+else
+    backup_mount=$(realpath -e -- "$backup_mount") || fail 'Backup mount does not exist.'
+    [[ "$backup_mount" != / ]] || fail 'The root filesystem is not a backup drive.'
+    mountpoint -q -- "$backup_mount" || fail 'Backup drive is not mounted; refusing to write to the internal disk.'
+    backup_dir=$(realpath -m -- "${backup_dir:-$backup_mount/spark-backups}")
+    [[ "$backup_dir" == "$backup_mount/"* ]] || fail 'Destination must be inside the specified mounted drive.'
+fi
 # Keep every source directory and lock open until the dump and all archives finish.
 declare -A drive_paths=()
 drive_ids=() source_fds=() source_locks=() normalized_dirs=()
 for file_dir in "${file_dirs[@]}"; do
     [[ -d "$file_dir" ]] || fail 'File storage does not exist; check --file-dir.'
     file_dir=$(realpath -e -- "$file_dir")
+    if ((!local_backup)); then
     [[ "$(stat -c %d -- "$file_dir")" != "$(stat -c %d -- "$backup_mount")" ]] || fail 'Backup drive must be on a different filesystem from every storage drive.'
     [[ "$backup_dir" != "$file_dir" && "$backup_dir" != "$file_dir/"* && "$file_dir" != "$backup_dir/"* ]] || fail 'Backup destination and file storage must be separate.'
+    fi
     for previous in "${normalized_dirs[@]}"; do
         [[ "$file_dir" != "$previous" && "$file_dir" != "$previous/"* && "$previous" != "$file_dir/"* ]] || fail 'Storage drives overlap.'
     done
@@ -108,10 +119,11 @@ for file_dir in "${file_dirs[@]}"; do
 done
 file_dir=${normalized_dirs[0]}
 # Hold a directory reference on the mounted drive during all writes.
+[[ ! -L "$backup_dir" ]] || fail 'Backup directory cannot be a symlink.'
 mkdir -p -- "$backup_dir"
 cd -- "$backup_dir"
 [[ "$(pwd -P)" == "$backup_dir" ]] || fail 'Destination changed during setup.'
-mountpoint -q -- "$backup_mount" || fail 'Backup drive was disconnected.'
+if ((!local_backup)); then mountpoint -q -- "$backup_mount" || fail 'Backup drive was disconnected.'; fi
 exec {backup_lock}>.backup.lock
 flock -n -x "$backup_lock" || fail 'Another backup is writing to this destination.'
 credentials=
@@ -158,6 +170,7 @@ if ((${#drive_ids[@]}>1)); then backup_format=spark-backup-v2; fi
 incomplete=$(mktemp -d ".incomplete-spark-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")
 {
     printf 'format=%s\ncreated_at_utc=%s\n' "$backup_format" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'source_instance=%s\n' "${drive_ids[0]}"
     printf 'database=%s\nfile_directory=%s\n' "$db_name" "$file_dir"
     printf 'chunk_bytes=1073741824\ncompression=gzip\nconsistency=offline-storage-lock\n'
     printf 'scope=SPARK database tables and file storage; excludes DB accounts, custom triggers/routines/events, server configuration and binaries\n'
@@ -176,7 +189,7 @@ for index in "${!drive_ids[@]}"; do
         prefix="drive-${drive_ids[index]}"
         printf '%s\t%s\n' "${drive_ids[index]}" "${normalized_dirs[index]}" >> "$incomplete/drives.tsv"
     fi
-    tar --create --sparse --file=- --directory="$pinned" --exclude='./.spark.lock' . \
+    tar --create --sparse --file=- --directory="$pinned" --exclude='./.spark.lock' --exclude='./.spark-backups' --exclude='./.spark-control' . \
         | gzip -c | split --bytes=1073741824 --numeric-suffixes=0 --suffix-length=6 - "$incomplete/$prefix.tar.gz.part-"
 done
 (
@@ -217,5 +230,5 @@ remember_location() (
     fi
     mv -T -- "$temporary" "$history_file" || return 1
 )
-if ! remember_location; then printf 'Backup succeeded, but the location history could not be saved.\n' >&2; fi
+if ((!local_backup)) && ! remember_location; then printf 'Backup succeeded, but the location history could not be saved.\n' >&2; fi
 printf 'Backup complete: %s/%s\n'  "$backup_dir" "$complete"

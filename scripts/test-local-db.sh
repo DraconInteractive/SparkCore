@@ -43,6 +43,7 @@ SPARK_TEST_TLS=0 python3 ./scripts/test-authentication.py
 if [ -n "${SPARK_TEST_NGINX:-}" ]; then
     python3 ./scripts/test-proxy-config.py
     SPARK_TEST_TLS=1 python3 ./scripts/test-authentication.py
+    python3 ./scripts/test-inter-spark.py
 else
     echo 'TLS proxy tests not selected; set SPARK_TEST_NGINX to the nginx executable to include them.'
 fi

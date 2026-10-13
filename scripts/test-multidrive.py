@@ -141,6 +141,12 @@ try:
         project_file=request('POST','/files?name=project&drive='+bl+'&directory='+urllib.parse.quote(offline_project['directory'],safe=''),b'project',201,{'Content-Type':'application/octet-stream'})[0]
         request('POST','/files/directories',{'directory':'/A-only/empty','drive':al})
         request('POST','/files/directories',{'directory':'/B-only/empty','drive':bl})
+        for letter in (al,bl): request('POST','/files/directories',{'directory':'/same/child','drive':letter})
+        request('PATCH','/files/directories',{'directory':'/same','destination':'/moved','drive':bl})
+        assert '/same/child' in request('GET','/files/directories?drive='+al)[0]['directories']
+        assert '/moved/child' in request('GET','/files/directories?drive='+bl)[0]['directories']
+        request('DELETE','/files/directories',{'directory':'/moved','drive':bl,'recursive':True},204)
+        request('DELETE','/files/directories',{'directory':'/same','drive':al,'recursive':True},204)
         adirs=request('GET','/files/directories?drive='+al)[0]['directories'];bdirs=request('GET','/files/directories?drive='+bl)[0]['directories']
         assert '/A-only/empty' in adirs and '/B-only/empty' not in adirs
         assert '/B-only/empty' in bdirs and '/A-only/empty' not in bdirs
@@ -168,6 +174,9 @@ try:
         assert not request('GET','/project/'+offline_project['id']+'/files')[0]['drive_online']
         assert request('PATCH','/projects/'+offline_project['id'],{'description':'offline edit'})[0]['description']=='offline edit'
         request('POST','/files/directories',{'directory':'/offline-new','drive':bl},503)
+        request('PATCH','/files/directories',{'directory':'/B-only','destination':'/new','drive':bl},503)
+        request('DELETE','/files/directories',{'directory':'/B-only','recursive':True,'drive':bl},503)
+
         request('POST','/projects',{'name':'Offline child','description':'fail','parent_id':offline_project['id']},503)
         request('POST','/files?name=offline&directory='+urllib.parse.quote(child['directory'],safe=''),b'bad',503,{'Content-Type':'application/octet-stream'})
         assert '/B-only/empty' in request('GET','/files/directories?drive='+bl)[0]['directories']

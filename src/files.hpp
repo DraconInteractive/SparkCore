@@ -25,6 +25,7 @@ public:
     nlohmann::json directories(const std::optional<std::string>& drive = std::nullopt) const;
     std::string default_drive(const std::string& directory = "/") const;
     void create_directory(const std::string& directory, const std::optional<std::string>& drive = std::nullopt) const;
+    nlohmann::json change_directory(const std::string& drive, const std::string& directory, const std::optional<std::string>& destination, bool recursive) const;
     bool deleting(const std::string& id) const;
     void forget(const std::string& id) const;
     nlohmann::json unfinished() const;

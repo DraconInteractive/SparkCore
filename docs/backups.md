@@ -1,4 +1,4 @@
-# External-drive backups
+# Backups and transfers
 
 A recoverable SPARK backup needs both the MariaDB database and every storage drive.
 File blobs alone do not retain names, logical directories, or project associations.
@@ -6,7 +6,7 @@ The backup command captures all SPARK database tables, including projects, board
 devices, timers, events, tasks, subscriptions and notification history, alongside
 file storage. It does not change the live data.
 
-This first version is **manual and offline**: stop every SPARK process using this
+Command-line creation is **manual and offline**: stop every SPARK process using this
 database before starting, but leave MariaDB running. The script holds the same
 exclusive storage lock as SPARK for the entire backup. It refuses to run while
 the server owns that lock, and the server cannot start against that storage until
@@ -14,7 +14,7 @@ the backup releases it. Do not use another application or SQL session to modify
 the database or stored files while backing up. The database dump uses a single
 InnoDB transaction; the storage lock keeps file revisions aligned with it.
 
-## Create a backup
+## Create an external-drive backup from the command line
 
 1. Mount the external drive using the OS. The scripts do not mount, format or erase
    drives. `lsblk -f` can help identify the current mount path.
@@ -36,7 +36,7 @@ InnoDB transaction; the storage lock keeps file revisions aligned with it.
 3. Run as the same OS user used to run SPARK:
 
    ```sh
-   ./scripts/backup.sh
+   ./scripts/backup.sh --choose
    ```
 
    The menu offers up to 20 previously successful mount/destination pairs, marked
@@ -58,8 +58,8 @@ InnoDB transaction; the storage lock keeps file revisions aligned with it.
    Location history is stored locally in `storage/backup-locations.tsv` (outside
    the file blobs); `SPARK_BACKUP_HISTORY` can override its path. History contains
    only paths, never credentials. You can remove that file to forget locations.
-   Noninteractive jobs must pass a mount or set the environment; they do not wait
-   for input unless `--choose` is explicitly requested.
+   Without an explicit mount or environment target, backups use persistent storage.
+   Jobs do not wait for input unless `--choose` is explicitly requested.
    `.env.local` is not loaded automatically; use the same environment-loading
    method as the server. Paths containing spaces must be quoted.
 4. Wait for **Backup complete**, restart SPARK, then safely unmount/eject the drive
@@ -67,12 +67,12 @@ InnoDB transaction; the storage lock keeps file revisions aligned with it.
 
 Requires Bash, MariaDB client tools (`mariadb` and `mariadb-dump`), GNU tar/coreutils, gzip and
 util-linux (`flock`, `mountpoint`). These tools are available on this antiX host.
-No Python service or new REST endpoint is needed. The normal provisioned SPARK
+The normal provisioned SPARK
 account has sufficient read permissions. Credentials are placed in a temporary
 mode-600 client option file, removed on normal exit/error, and are never written
 into the backup or command-line arguments.
 
-The destination must be under the specified mounted directory and on a different
+For explicit external targets, the destination must be under the specified mounted directory and on a different
 filesystem from every source storage drive. An unplugged/unmounted drive is an error; the
 script will not silently put the backup on the internal disk. Separate backup
 runs are serialized. Keep the chosen drive mounted for the entire command.
@@ -219,7 +219,7 @@ replacement roots, reordered roots, relocated restores and omitted backup drives
 ## Dashboard backups
 
 Open `/` and choose **Back up storage**. Select a previous successful location or
-enter an absolute mount path and optional destination directory. The drive must
+leave the mount blank for persistent storage, or enter an absolute mount path and optional destination directory. An external drive must
 already be mounted and writable by the server's OS account.
 
 SPARK returns HTTP 202, drains HTTP requests, stops its TCP notification service
@@ -250,3 +250,83 @@ Runtime detachment does not remove a drive from full backups. Reconnect every
 registered drive at its recorded path, or attach it at its new path, before backup.
 An offline/missing drive fails the backup rather than silently creating a partial
 recovery point. The database dump preserves drive letters and attachment state.
+
+## Local backup catalog and inter-SPARK transfers (API 1.36.0)
+
+The dashboard backup destination is optional. An empty request to `POST /admin/backup`
+(with `Content-Type: application/json` and `X-SPARK-Admin: dashboard`) stores the
+backup on the persistent drive in `.spark-backups`. An explicit `mount` and optional
+`destination` preserve external-drive backups. The command-line equivalent is
+`scripts/backup.sh --local`; `--choose` still selects an external location.
+All registered source drives must be available for a complete backup.
+
+Backup creation still pauses REST and TCP to obtain the existing offline-consistent
+snapshot. The dashboard/viewer reconnects afterwards. Transfers are separate
+background jobs and leave ordinary services running. A local copy does not protect
+against loss of the persistent drive; use Copy or Send for another physical copy.
+
+`/backups/explorer` lists persistent-drive backups, incomplete attempts, sizes,
+manifests and individual archive downloads. It offers deletion, verified copy/move
+to another attached SPARK drive, and sending to a saved SPARK connection. Copy and
+Send retain the source. Move verifies and flushes the destination before removing
+the source. One transfer runs at a time; backup deletion and maintenance are blocked
+until it finishes. Download all archive parts plus manifest and SHA256SUMS to restore.
+The viewer does not inventory external copies or remotely received backups.
+
+Both `.spark-backups` and `.spark-control` are excluded from every storage archive.
+This prevents recursive backups and excludes outbound credentials and transfer
+receipts. Existing backup formats and restore tools remain compatible.
+
+### API
+
+- `GET /backups`: persistent-drive catalog.
+- `GET /backups/drives`: destinations available to backup administrators.
+- `GET /backups/{id}/files/{name}`: stream an archive member.
+- `DELETE /backups/{id}`: permanently delete a local complete or incomplete backup.
+- `POST /backups/{id}/transfers`: `{ "action": "copy", "drive": "B" }`,
+  `{ "action": "move", "drive": "B" }`, or
+  `{ "action": "send", "connection_id": "..." }`; returns 202 with `job_id`.
+- `GET /backups/jobs`: durable job state, stage, completed/total bytes and errors.
+- `POST /backups/jobs/{id}/retry`: retry a failed or interrupted job.
+
+Requires `admin.backup`; sending and retrying sends additionally require
+`admin.connections`. A process restart marks unfinished jobs interrupted. A retry
+rechecks the source and already-uploaded remote parts. It resumes between archive
+parts (up to 1 GiB), not within an interrupted part. Integrity mismatches stop the
+transfer instead of overwriting an unrelated remote file. Checksum verification is
+repeated before transfer; the catalog's creation verification is not a continuous
+integrity monitor. Creation failures retain an incomplete directory for inspection
+or deletion.
+
+### Saved connections
+
+Visit `/connections/explorer` with `admin.connections`. Register a name, HTTPS
+origin, remote device ID, provisioned token, remote drive letter, and base directory.
+Saving or editing verifies the token before persisting it. Test refreshes its
+permission snapshot. Deleting a connection removes the local secret but does not
+revoke it on the remote instance. Secrets are held in a private owner-only file,
+never returned through GET, and are not included in backups. Host administrators
+and local processes running as the SPARK OS user can access them.
+
+- `GET/POST /connections`: list/register.
+- `PATCH/DELETE /connections/{id}`: edit/remove.
+- `POST /connections/{id}/test`: refresh status and grants.
+- `POST /auth/verify`: bearer token plus `{"device_id":"spark-a"}`. Returns only
+  the token's own current permissions; no additional grant required. Wrong device
+  returns 403; invalid/revoked token returns 401. Administrator tokens are rejected.
+  Open mode explicitly returns `authenticated:false, auth_mode:open`.
+
+Both instances need this release. Provision a dedicated device token on B with
+`files.read` and `files.write`, then register it on A. Those grants remain global
+file access on B; there is no directory-scoped authorization. Existing administrator
+credentials need the new `admin.connections` grant (issue a replacement administrator
+credential with the desired grants). Device credentials cannot receive admin grants.
+
+Transfers require the `curl` executable and system CA certificates. Certificates
+and hostnames are verified; HTTP, redirects and embedded URL credentials are not
+accepted. Remote backups land in `{base}/{source-drive-id}/{backup-id}` on the
+selected drive. A downloads each uploaded member as a stream and verifies SHA-256;
+`SPARK-BACKUP-COMPLETE.json` is published only after all parts pass. Files are ordinary
+shared files on B and can be downloaded through its file explorer. Connection
+credentials, jobs, and source-instance identity remain separate from calendar sync
+or other future connection uses.

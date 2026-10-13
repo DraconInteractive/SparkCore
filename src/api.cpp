@@ -3,6 +3,7 @@
 #include "browser_auth.hpp"
 #include "commands.hpp"
 #include "dashboard.hpp"
+#include "inter_spark.hpp"
 #include "api_docs.hpp"
 #include "devices.hpp"
 #include "timers.hpp"
@@ -23,7 +24,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.34.0";
+constexpr auto api_version = "1.36.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -96,6 +97,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     for (const auto& endpoint : command_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : dashboard_endpoints()) discovery["endpoints"].push_back(endpoint);
     for(const auto& endpoint:browser_endpoints())discovery["endpoints"].push_back(endpoint);
+    for(const auto& endpoint:inter_spark_endpoints())discovery["endpoints"].push_back(endpoint);
     for(const auto& endpoint:credential_endpoints())discovery["endpoints"].push_back(endpoint);
     // Keep the self-example independent of the size of the endpoint catalogue.
     discovery["endpoints"][2]["output"]["body"] = {
@@ -176,7 +178,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         if(request.path=="/files/explorer")timer_allow="GET, HEAD, OPTIONS";
         else if(request.path=="/files/drives")timer_allow="GET, HEAD, POST, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/files/drives/[A-Z]+)")))timer_allow="DELETE, OPTIONS";
-        else if(request.path=="/files/directories")timer_allow="GET, HEAD, POST, OPTIONS";
+        else if(request.path=="/files/directories")timer_allow="GET, HEAD, POST, PATCH, DELETE, OPTIONS";
         else if(request.path=="/files")timer_allow="GET, HEAD, POST, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/files/[^/]+/content)")))timer_allow="GET, HEAD, PUT, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/files/[^/]+)")))timer_allow="GET, HEAD, PATCH, DELETE, OPTIONS";
@@ -246,7 +248,9 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     configure_browser_auth(server,auth);
     configure_credentials(server,auth);
     server.set_post_routing_handler([](const auto&,auto& response){response.set_header("X-Content-Type-Options","nosniff");response.set_header("X-Frame-Options","DENY");response.set_header("Referrer-Policy","no-referrer");response.set_header("Content-Security-Policy","default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'");});
-    configure_dashboard(server, maintenance ? maintenance : std::make_shared<Maintenance>(), auth);
+    if(!maintenance)maintenance=std::make_shared<Maintenance>();
+    configure_dashboard(server, maintenance, auth);
+    configure_inter_spark(server,files,maintenance,auth);
     configure_commands(server, std::make_shared<CommandStore>(DatabaseConfig::from_environment()), auth);
     configure_devices(server, std::move(registry), auth);
     configure_timers(server, std::move(timers), auth);

@@ -95,7 +95,7 @@ const std::set<std::string>& permission_names() {
         "timers.read","timers.write","events.read","events.write","tasks.read","tasks.write",
         "files.read","files.write","projects.read","projects.write","boards.read","boards.write",
         "commands.read","commands.invoke","commands.advertise","commands.execute","notifications.read",
-        "devices.delegate","admin.restart","admin.backup","admin.storage","admin.credentials"};
+        "devices.delegate","admin.restart","admin.backup","admin.storage","admin.credentials","admin.connections"};
     return names;
 }
 bool permitted(const Identity& who,const std::string& permission) {

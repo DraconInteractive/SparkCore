@@ -64,6 +64,29 @@ int main(int argc,char**){
                 check(expect(client.Get("/files/directories"),200)["directories"].dump().find("/empty/nested")!=std::string::npos,"empty directories survive restart");
             }else{
                 DB db(config);
+                auto folder_patch=[&](const json& packet,int status,const char* error=nullptr){return expect(client.Patch("/files/directories",packet.dump(),"application/json"),status,error);};
+                auto folder_delete=[&](const json& packet,int status,const char* error=nullptr){return expect(client.Delete("/files/directories",packet.dump(),"application/json"),status,error);};
+                expect(client.Post("/files/directories",R"({"directory":"/folder%_🌳/nested"})","application/json"),200);
+                auto folder_file=expect(client.Post("/files?name=inside.txt&directory=/folder%25_%F0%9F%8C%B3/nested","contents","application/octet-stream"),201);
+                folder_delete({{"directory","/folder%_🌳"}},409,"directory_not_empty");
+                folder_patch({{"directory","/folder%_🌳"},{"destination","/folder%_🌳/inside"}},400,"invalid_destination");
+                folder_patch({{"directory","/folder%_🌳"},{"destination","/"}},409,"directory_conflict");
+                folder_patch({{"directory","/"},{"destination","/root"}},409,"directory_root_protected");
+                folder_delete({{"directory","/"},{"recursive",true}},409,"directory_root_protected");
+                folder_delete({{"directory","/missing"}},404,"directory_not_found");
+                folder_delete({{"directory","/folder%_🌳"},{"recursive","true"}},400,"invalid_recursive");
+                // Failure after path updates must roll back paths and notification events together.
+                db.run("CREATE TRIGGER fail_folder_event BEFORE INSERT ON events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='folder test'");
+                folder_patch({{"directory","/folder%_🌳"},{"destination","/renamed"}},503,"database_unavailable");
+                db.run("DROP TRIGGER fail_folder_event");
+                check(expect(client.Get("/files/"+folder_file["id"].get<std::string>()),200)["directory"]=="/folder%_🌳/nested","rename rollback");
+                folder_patch({{"directory","/folder%_🌳"},{"destination","/archive/renamed"}},200);
+                check(expect(client.Get("/files/"+folder_file["id"].get<std::string>()),200)["directory"]=="/archive/renamed/nested","recursive Unicode rename");
+                check(client.Get(content_url(folder_file))->body=="contents","rename retains download URL and bytes");
+                folder_delete({{"directory","/archive/renamed"},{"recursive",true}},204);
+                expect(client.Get(content_url(folder_file)),404,"file_not_found");
+                folder_delete({{"directory","/archive"}},204);
+
                 expect(client.Post("/files?name=wrong.txt","text","text/plain"),415,"unsupported_media_type");
                 for(const std::string name:{"..","../x","%2Fetc%2Fpasswd","a%0Ab","a%5Cb"})expect(client.Post("/files?name="+name,"x","application/octet-stream"),400,"invalid_filename");
                 expect(client.Post("/files?name=a&name=b","x","application/octet-stream"),400,"invalid_parameters");
@@ -195,6 +218,9 @@ int main(int argc,char**){
                 auto project_create=[&](const std::string& name){return expect(client.Post("/projects",json{{"name",name},{"description","Project details"},{"github_url","https://github.com/example/repo"}}.dump(),"application/json"),201);};
                 auto project=project_create("Project%_🌳");const auto project_path="/projects/"+project["id"].get<std::string>();
                 check(project["directory"]=="/projects/Project%_🌳","project logical directory");
+                folder_patch({{"directory",project["directory"]},{"destination","/moved-project"}},409,"directory_in_use");
+                folder_delete({{"directory","/projects"},{"recursive",true}},409,"directory_in_use");
+
                 check(expect(client.Get(project_path),200)==project,"project get");
                 check(client.Head(project_path)->status==200 && client.Options(project_path)->status==204,"project HEAD and OPTIONS");
                 expect(client.Post("/projects",R"({"name":"../bad","description":""})","application/json"),400,"invalid_name");

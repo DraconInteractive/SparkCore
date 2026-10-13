@@ -499,3 +499,11 @@ Device tokens can be provisioned from **Device access** on the dashboard
 (`/admin/credentials/explorer`). An administrator with `admin.credentials` can
 select permissions, copy a newly issued token once, and revoke device credentials.
 See [browser device provisioning](docs/identity-permissions.md#browser-device-provisioning-api-1340).
+
+### Local backups and SPARK connections
+
+Use `/backups/explorer` to create backups on persistent storage, copy/move them to
+an attached drive, send them to another SPARK, or delete local copies. Register
+remote credentials in `/connections/explorer` (`admin.connections` required).
+See [backup and connection setup](docs/backups.md). Outbound HTTPS transfers require
+`curl` and CA certificates. No database migration is required for this feature.
