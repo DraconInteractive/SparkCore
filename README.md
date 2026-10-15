@@ -512,3 +512,6 @@ Backup creation now opens `/backups/new` for a size/free-space estimate and expl
 confirmation. `/backups/progress` remains available during the offline snapshot;
 ordinary REST requests return 503 with Retry-After. Live logs and interrupted state
 are persisted. Existing `admin.backup` credentials suffice; no migration is needed.
+
+Folder downloads: see [resumable ZIP64 downloads](docs/folder-downloads.md) for
+recursive explorer downloads, preparation, authentication and HTTP resume.

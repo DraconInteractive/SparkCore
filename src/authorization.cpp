@@ -29,7 +29,7 @@ const std::vector<RoutePolicy>& route_policies(){
         add("POST","/admin/backup-estimate",{"admin.backup"});
         add("POST","/auth/verify",{});
         for(auto path:{"/backups","/backups/explorer","/backups/drives","/backups/jobs","/backups/{id}/files/{name}"})add("GET",path,{"admin.backup"});
-        add("DELETE","/backups/{id}",{"admin.backup"});add("POST","/backups/{id}/transfers",{"admin.backup"});add("POST","/backups/jobs/{id}/retry",{"admin.backup"});
+        add("DELETE","/backups/jobs/completed",{"admin.backup"});add("DELETE","/backups/jobs/{id}",{"admin.backup"});add("DELETE","/backups/{id}",{"admin.backup"});add("POST","/backups/{id}/transfers",{"admin.backup"});add("POST","/backups/jobs/{id}/retry",{"admin.backup"});
         for(auto path:{"/connections","/connections/explorer"})add("GET",path,{"admin.connections"});
         add("POST","/connections",{"admin.connections"});add("PATCH","/connections/{id}",{"admin.connections"});add("DELETE","/connections/{id}",{"admin.connections"});add("POST","/connections/{id}/test",{"admin.connections"});
         for(auto path:{"/","/health","/version","/api","/api/docs"})add("GET",path,{"discovery.read"});
@@ -57,6 +57,7 @@ const std::vector<RoutePolicy>& route_policies(){
         }
         add("GET","/events/occurrences",{"events.read"});add("PUT","/daily-tasks/{id}/checked",{"tasks.write"});
         for(auto path:{"/files","/files/explorer","/files/drives","/files/directories","/files/{id}","/files/{id}/content"})add("GET",path,{"files.read"});
+        add("POST","/files/downloads",{"files.read"});add("GET","/files/downloads/{id}",{"files.read"});add("GET","/files/downloads/{id}/content",{"files.read"});add("DELETE","/files/downloads/{id}",{"files.read"});
         add("POST","/files/drives",{"admin.storage"});add("DELETE","/files/drives/{letter}",{"admin.storage"});
         for(auto path:{"/files","/files/directories"})add("POST",path,{"files.write"});
         for(auto method:{"PATCH","DELETE"})add(method,"/files/directories",{"files.write"});

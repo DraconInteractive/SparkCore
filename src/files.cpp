@@ -1,4 +1,5 @@
 #include "files.hpp"
+#include "folder_downloads.hpp"
 #include "file_explorer.hpp"
 #include "bounded_body.hpp"
 #include <sys/file.h>
@@ -261,6 +262,7 @@ void FileStorage::mount_roots(bool startup){
         }catch(...){for(auto& drive:drives_){if(drive.lock>=0)close(drive.lock);if(drive.fd>=0)close(drive.fd);drive.lock=drive.fd=-1;drive.id.clear();}throw;}
 }
 void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storage, std::shared_ptr<Authorization> auth){
+    configure_folder_downloads(server,storage,auth);
     auto upload=[storage,auth](const httplib::Request& request,httplib::Response& response,const httplib::ContentReader& read){
         // Close after rejected uploads: their unread bodies must not become another request.
         auto bad=[&](int status,const char* code){response.set_header("Connection","close");failure(response,status,code);};

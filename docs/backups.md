@@ -380,3 +380,11 @@ terminal/tmux session. The JSON includes `log_path` for manual inspection with
 not automatically remove or resume its incomplete archive. Timing history is in
 `.spark-control/backup-history.json`; control files remain excluded from backups.
 Logs are retained for diagnosis; there is no automatic log rotation in this version.
+
+Transfer history can be managed in `/backups/explorer`: **Dismiss** removes an
+individual succeeded, failed or interrupted record; **Clear completed** removes
+all successful records. Neither action deletes backup files or cancels transfers.
+Queued/running jobs cannot be dismissed. There is no automatic pruning.
+The corresponding APIs are `DELETE /backups/jobs/{id}` and
+`DELETE /backups/jobs/completed`, both requiring `admin.backup` and returning
+`{"removed": N}`. Missing IDs return 404; active jobs return 409 `job_in_progress`.

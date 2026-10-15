@@ -46,7 +46,7 @@ bool BrowserSessions::origin_ok(const httplib::Request& req,bool mutation)const{
     if(req.has_header("Origin"))return req.get_header_value_count("Origin")==1&&req.get_header_value("Origin")==origin_;
     return !mutation;
 }
-void BrowserSessions::prune(){auto now=Clock::now();for(auto it=sessions_.begin();it!=sessions_.end();)if(now-it->second.created>=lifetime_||now-it->second.seen>=idle_)it=sessions_.erase(it);else ++it;}
+void BrowserSessions::prune(){auto now=Clock::now();for(auto it=sessions_.begin();it!=sessions_.end();)if(now-it->second.created>=lifetime_||(!it->second.remember_device&&now-it->second.seen>=idle_))it=sessions_.erase(it);else ++it;}
 std::optional<Identity> BrowserSessions::resolve(const httplib::Request& req,httplib::Response& res,bool touch){
     const bool mutation=req.method!="GET"&&req.method!="HEAD";
     if(!origin_ok(req,mutation)){reply(res,403,{{"error","browser_origin_mismatch"}});return {};}
@@ -63,13 +63,13 @@ void BrowserSessions::login(const httplib::Request& req,httplib::Response& res){
     if(req.has_header("Authorization")){reply(res,400,{{"error","ambiguous_credentials"}});return;}
     if(req.get_header_value("Content-Type").substr(0,req.get_header_value("Content-Type").find(';'))!="application/json"){reply(res,415,{{"error","unsupported_media_type"}});return;}
     auto packet=json::parse(req.body,nullptr,false);
-    if(!packet.is_object()||packet.size()!=1||!packet.contains("token")||!packet["token"].is_string()){reply(res,400,{{"error","invalid_packet"}});return;}
+    if(!packet.is_object()||packet.size()!=(packet.contains("remember_device")?2u:1u)||!packet.contains("token")||!packet["token"].is_string()||(packet.contains("remember_device")&&!packet["remember_device"].is_boolean())){reply(res,400,{{"error","invalid_packet"}});return;}
     auto who=provider_->authenticate(packet["token"].get<std::string>());
     if(!who||who->kind!="administrator"){reply(res,401,{{"error","invalid_login"}});return;}
     auto id=random_secret(),csrf=random_secret();std::lock_guard<std::mutex> lock(mutex_);prune();
     auto old=cookie(req);if(!old.empty())sessions_.erase(old);
     if(sessions_.size()>=256){reply(res,429,{{"error","session_limit"}});return;}
-    auto now=Clock::now();sessions_.emplace(id,Session{*who,csrf,now,now});
+    auto now=Clock::now();sessions_.emplace(id,Session{*who,csrf,now,now,packet.value("remember_device",false)});
     res.set_header("Set-Cookie",std::string(session_cookie)+"="+id+"; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age="+std::to_string(lifetime_.count()));
     reply(res,200,{{"mode","session"},{"subject",who->subject},{"permissions",who->permissions},{"csrf_token",csrf},{"expires_in_seconds",lifetime_.count()}});
 }

@@ -146,7 +146,7 @@ or permission changes disconnect the session. In-flight HTTP operations/download
 may finish. See [the protocol details and matrix](identity-permissions.md).
 
 Step 4 decisions: administrator-token login, process-local random sessions with
-Secure/HttpOnly/SameSite=Strict cookies, eight-hour absolute and 30-minute idle
+Secure/HttpOnly/SameSite=Strict cookies, 12-hour absolute and optional 30-minute idle
 expiry, and per-session CSRF plus exact configured HTTPS Origin/Host checks.
 `auth.browser_origin` opts in to browser login without trusting forwarded headers.
 Sessions survive dashboard maintenance, but not process restarts. Revocation and

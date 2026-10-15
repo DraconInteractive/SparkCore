@@ -54,7 +54,7 @@ and device idempotency keys are preserved. No live database is changed by buildi
   dashboard or API reference redirects here; API callers continue to receive 401.
 - `POST /auth/login`: JSON `{"token":"<administrator-token>"}` with exact configured
   Origin/Host and `X-SPARK-Login: 1`. No CORS is enabled. Success sets
-  `__Host-spark_session` with Path=/, Secure, HttpOnly, SameSite=Strict and an eight-hour
+  `__Host-spark_session` with Path=/, Secure, HttpOnly, SameSite=Strict and a 12-hour
   Max-Age. A fresh random session and CSRF token are generated; the previous cookie's
   session is invalidated on successful re-login. Login does not grant permissions.
 - `GET /auth/session`: returns mode, subject, explicit permissions and `csrf_token`
@@ -68,7 +68,8 @@ and device idempotency keys are preserved. No live database is changed by buildi
   Downloads and previews receive cookies normally without putting secrets in URLs.
 
 Sessions are held in process memory, limited to 256 active sessions, expire after
-30 minutes without an authenticated API request, and expire absolutely after eight
+30 minutes without an authenticated API request unless “Remember this device” was
+selected, and expire absolutely after 12
 hours even if polling continues. A dashboard restart/backup preserves them; a full
 process restart requires login again. Revocation or a permission/identity change
 invalidates the session on its next request. In-flight HTTP operations may finish.
@@ -114,3 +115,8 @@ the server and session implementation remain C++.
 
 Security design references: [OWASP session management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
 and [OWASP CSRF prevention](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html).
+
+The login checkbox “Remember this device” sends optional `remember_device: true`
+to `POST /auth/login`. It disables the 30-minute idle timeout for that session,
+while retaining the 12-hour absolute expiry. Omitted or false keeps the idle
+timeout. Sessions remain in memory and do not survive a full server restart.

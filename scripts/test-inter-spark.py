@@ -44,6 +44,8 @@ try:
             proc=subprocess.Popen(['./build/spark_server','--config',str(item['config'])],env=env,stdout=log,stderr=log);processes.append(proc)
             wait(lambda:call(item['port'],'/health',token=item['admin']))
         def local(path,method='GET',body=None,status=200,token=None):return call(a['port'],path,method,body,token or a['admin'],status)
+        from folder_download_checks import check_downloads
+        check_zip_restart=check_downloads(a['port'],a['admin'],a['reader'],a['minimal'],wait)
         assert call(b['port'],'/auth/verify','POST',{'device_id':'minimal'},b['minimal'])['permissions']==[]
         call(b['port'],'/auth/verify','POST',{'device_id':'wrong'},b['device']['token'],403)
         call(b['port'],'/auth/verify','POST',{'device_id':'spark-a'},None,401)
@@ -108,6 +110,13 @@ try:
         jid=job({'action':'send','connection_id':cid});assert wait(lambda:completed(jid))['state']=='failed'
         local('/connections/'+cid,'PATCH',{'device_id':'spark-a','token':b['device']['token']})
         retry=local('/backups/jobs/'+jid+'/retry','POST',{},202)['job_id'];assert wait(lambda:completed(retry))['state']=='succeeded'
+        local('/backups/jobs/completed','DELETE',status=403,token=a['reader'])
+        local('/backups/jobs/'+jid,'DELETE',status=403,token=a['reader'])
+        assert local('/backups/jobs/completed','DELETE')['removed']==3
+        assert [j['id'] for j in local('/backups/jobs')['jobs']]==[jid]
+        assert source.exists() and call(b['port'],'/files?directory='+quote(directory,safe=''),token=b['admin'])['files']==remote
+        local('/backups/jobs/'+jid,'DELETE');local('/backups/jobs/'+jid,'DELETE',status=404)
+        assert not local('/backups/jobs')['jobs']
         # Attach another storage location, copy, then verified move.
         other=root/'other';other.mkdir();drive=local('/files/drives','POST',{'path':str(other)},201)['letter']
         jid=job({'action':'copy','drive':drive});result=wait(lambda:completed(jid));assert result['state']=='succeeded',result
@@ -141,12 +150,15 @@ try:
         https('GET','/admin/backup-status',headers={'Cookie':cookie})
         https('POST','/auth/logout',{},headers={'Cookie':cookie,'X-SPARK-CSRF':session['csrf_token']},status=204)
         https('GET','/admin/backup-status',headers={'Cookie':cookie},status=401)
+        history=local('/backups/jobs')['jobs']
         processes[0].terminate();processes[0].wait(timeout=10)
         status_path=a['folder']/'files/.spark-control/backup-status.json'
         saved=json.loads(status_path.read_text());saved['state']='running';saved.pop('finished_at',None);status_path.write_text(json.dumps(saved))
         processes[0]=subprocess.Popen(['./build/spark_server','--config',str(a['config'])],env=env,stdout=log,stderr=log)
         wait(ready)
         assert local('/admin/backup-status')['state']=='interrupted'
+        assert local('/backups/jobs')['jobs']==history
+        check_zip_restart()
         print('Backup estimates, live maintenance visibility, TLS login/CSRF, interrupted recovery, exclusion, verified transfers, retry and drive copy/move passed.')
 except BaseException:
     # Server output intentionally excludes credentials.

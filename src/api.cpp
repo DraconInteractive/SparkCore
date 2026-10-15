@@ -12,6 +12,7 @@
 #include "calendar.hpp"
 #include "daily_tasks.hpp"
 #include "files.hpp"
+#include "folder_downloads.hpp"
 #include "projects.hpp"
 #include "boards.hpp"
 #include <limits>
@@ -24,7 +25,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.37.0";
+constexpr auto api_version = "1.39.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -93,6 +94,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     });
     for (const auto& endpoint : board_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : project_endpoints()) discovery["endpoints"].push_back(endpoint);
+    for (const auto& endpoint : folder_download_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : file_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : command_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : backup_visibility_endpoints()) discovery["endpoints"].push_back(endpoint);
@@ -177,6 +179,9 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         else if(request.path=="/projects")timer_allow="GET, HEAD, POST, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/projects/[^/]+)")))timer_allow="GET, HEAD, PATCH, DELETE, OPTIONS";
         if(request.path=="/files/explorer")timer_allow="GET, HEAD, OPTIONS";
+        else if(request.path=="/files/downloads")timer_allow="POST, OPTIONS";
+        else if(std::regex_match(request.path,std::regex(R"(/files/downloads/[0-9a-f]{32})")))timer_allow="GET, HEAD, DELETE, OPTIONS";
+        else if(std::regex_match(request.path,std::regex(R"(/files/downloads/[0-9a-f]{32}/content)")))timer_allow="GET, HEAD, OPTIONS";
         else if(request.path=="/files/drives")timer_allow="GET, HEAD, POST, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/files/drives/[A-Z]+)")))timer_allow="DELETE, OPTIONS";
         else if(request.path=="/files/directories")timer_allow="GET, HEAD, POST, PATCH, DELETE, OPTIONS";
