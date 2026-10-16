@@ -387,7 +387,11 @@ unsigned long long NotificationStore::latest() const {
 json NotificationStore::after(unsigned long long sequence, unsigned long long through) const {
     Connection connection(config_);
     Statement query(connection,
-        "SELECT JSON_MERGE_PATCH(JSON_OBJECT('sequence',n.sequence,'event_id',e.event_id,'type',e.type,'resource',e.resource,'source_device',e.source_device), IF(e.type='calendar.reminder' OR e.type IN ('command.available','command.updated','files.directories_updated'),e.payload,IF(e.type='device.subscription_updated',JSON_OBJECT('subscribed',JSON_EXTRACT(e.payload,'$.subscribed')),JSON_OBJECT()))) "
+        "SELECT JSON_MERGE_PATCH(JSON_OBJECT('sequence',n.sequence,'event_id',e.event_id,'type',e.type,'resource',e.resource,'source_device',e.source_device), "
+        "CASE WHEN e.type='calendar.reminder' THEN JSON_MERGE_PATCH(JSON_OBJECT('calendar','local'),e.payload) "
+        "WHEN e.type IN ('calendar.created','calendar.updated','calendar.deleted') THEN JSON_OBJECT('calendar',COALESCE(JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.calendar')),'local'),'previous_calendar',JSON_EXTRACT(e.payload,'$.previous_calendar')) "
+        "WHEN e.type IN ('command.available','command.updated','files.directories_updated') THEN e.payload "
+        "WHEN e.type='device.subscription_updated' THEN JSON_OBJECT('subscribed',JSON_EXTRACT(e.payload,'$.subscribed')) ELSE JSON_OBJECT() END) "
         "FROM notification_log n JOIN events e ON e.event_id=n.event_id WHERE n.sequence>? AND n.sequence<=? ORDER BY n.sequence LIMIT 256", {std::to_string(sequence),std::to_string(through)});
     query.execute();
     return query.rows();
@@ -478,7 +482,7 @@ std::unordered_set<std::string> NotificationStore::pulse_subscribers() const {
 namespace spark {
 namespace {
 const std::string calendar_projection =
-    "JSON_OBJECT('id',id,'name',name,'description',description,'place',place,"
+    "JSON_OBJECT('id',id,'calendar',calendar,'name',name,'description',description,'place',place,"
     "'recurrence',JSON_EXTRACT(recurrence,'$'),'reminder_minutes',reminder_minutes,"
     "'last_reminder_occurs_at',DATE_FORMAT(last_reminder_occurs_at,'%Y-%m-%dT%H:%i:%sZ'),"
     "'occurs_at',DATE_FORMAT(occurs_at,'%Y-%m-%dT%H:%i:%sZ'),"
@@ -504,23 +508,26 @@ json CalendarStore::create(const json& packet) const {
     Statement uuid(connection, "SELECT JSON_QUOTE(UUID())");
     uuid.execute();
     const auto id = uuid.rows()[0].get<std::string>();
-    Statement insert(connection, "INSERT INTO calendar_events(id,name,description,occurs_at,place,recurrence,reminder_minutes) VALUES (?,?,?,?,?,?,?)",
-        {id, packet["name"].get<std::string>(), packet["description"].get<std::string>(), sql_datetime(packet["occurs_at"]), nullable_string(packet.value("place", json(nullptr))), packet.value("recurrence",json(nullptr)).is_null()?std::nullopt:std::optional<std::string>(packet["recurrence"].dump()), packet.value("reminder_minutes",json(nullptr)).is_null()?std::nullopt:std::optional<std::string>(packet["reminder_minutes"].dump())});
+    Statement insert(connection, "INSERT INTO calendar_events(id,name,description,occurs_at,place,recurrence,reminder_minutes,calendar) VALUES (?,?,?,?,?,?,?,?)",
+        {id, packet["name"].get<std::string>(), packet["description"].get<std::string>(), sql_datetime(packet["occurs_at"]), nullable_string(packet.value("place", json(nullptr))), packet.value("recurrence",json(nullptr)).is_null()?std::nullopt:std::optional<std::string>(packet["recurrence"].dump()), packet.value("reminder_minutes",json(nullptr)).is_null()?std::nullopt:std::optional<std::string>(packet["reminder_minutes"].dump()), packet.value("calendar",std::string("local"))});
     insert.execute();
     auto record = *read_calendar(connection, id);
     append_event(connection, "calendar.created", "/events/" + id, packet.value("source_device", json(nullptr)), record);
     transaction.commit();
     return record;
 }
-std::optional<json> CalendarStore::get(const std::string& id) const {
+std::optional<json> CalendarStore::get(const std::string& id, const std::optional<std::string>& calendar) const {
     Connection connection(config_);
-    return read_calendar(connection, id);
+    auto record=read_calendar(connection,id);
+    if(record&&calendar&&(*record)["calendar"]!=*calendar)throw std::invalid_argument("calendar_mismatch");
+    return record;
 }
-std::optional<json> CalendarStore::patch(const std::string& id, const json& packet) const {
+std::optional<json> CalendarStore::patch(const std::string& id, const json& packet, const std::optional<std::string>& calendar) const {
     Connection connection(config_);
     Transaction transaction(connection);
     auto record = read_calendar(connection, id, true);
     if (!record) return std::nullopt;
+    if((calendar&&(*record)["calendar"]!=*calendar)||(packet.contains("calendar")&&packet["calendar"]!=(*record)["calendar"]))throw std::invalid_argument("calendar_mismatch");
     auto updated = *record;
     for (const auto* field : {"name", "description", "occurs_at", "place", "recurrence", "reminder_minutes"}) if (packet.contains(field)) updated[field] = packet[field];
     if (updated == *record) { transaction.commit(); return record; }
@@ -536,11 +543,23 @@ std::optional<json> CalendarStore::patch(const std::string& id, const json& pack
     transaction.commit();
     return record;
 }
-bool CalendarStore::remove(const std::string& id) const {
+std::optional<json> CalendarStore::move(const std::string& id, const json& packet) const {
+    Connection connection(config_);Transaction transaction(connection);
+    auto record=read_calendar(connection,id,true);if(!record)return std::nullopt;
+    if((*record)["calendar"]==packet["calendar"]){transaction.commit();return record;}
+    if(packet.contains("from_calendar")&&packet["from_calendar"]!=(*record)["calendar"])throw std::invalid_argument("calendar_mismatch");
+    const auto previous=(*record)["calendar"];
+    Statement update(connection,"UPDATE calendar_events SET calendar=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{packet["calendar"].get<std::string>(),id});update.execute();
+    record=read_calendar(connection,id);auto payload=*record;payload["previous_calendar"]=previous;
+    append_event(connection,"calendar.updated","/events/"+id,packet.value("source_device",json(nullptr)),payload);
+    transaction.commit();return record;
+}
+bool CalendarStore::remove(const std::string& id, const std::optional<std::string>& calendar) const {
     Connection connection(config_);
     Transaction transaction(connection);
     auto record = read_calendar(connection, id, true);
     if (!record) return false;
+    if(calendar&&(*record)["calendar"]!=*calendar)throw std::invalid_argument("calendar_mismatch");
     Statement remove(connection, "DELETE FROM calendar_events WHERE id=?", {id});
     remove.execute();
     append_event(connection, "calendar.deleted", "/events/" + id, nullptr, *record);
@@ -563,15 +582,15 @@ void CalendarStore::tick() const {
         if(occurrence && *occurrence<=now+(*record)["reminder_minutes"].get<int>()*60) {
             const auto when=calendar_timestamp(*occurrence);
             Statement mark(connection,"UPDATE calendar_events SET last_reminder_occurs_at=? WHERE id=?",{sql_datetime(when),id.get<std::string>()}); mark.execute();
-            append_event(connection,"calendar.reminder","/events/"+id.get<std::string>(),nullptr,{{"occurrence_at",when}});
+            append_event(connection,"calendar.reminder","/events/"+id.get<std::string>(),nullptr,{{"occurrence_at",when},{"calendar",(*record)["calendar"]}});
         }
         transaction.commit();
     }
 }
 json CalendarStore::list(const json& filters, bool expand) const {
     Connection connection(config_);
-    std::string sql = "SELECT " + calendar_projection + " FROM calendar_events WHERE 1=1";
-    Parameters values;
+    std::string sql = "SELECT " + calendar_projection + " FROM calendar_events WHERE calendar=?";
+    Parameters values{filters.value("calendar",std::string("local"))};
     if (filters.contains("place")) { sql += " AND BINARY place=BINARY ?"; values.push_back(filters["place"].get<std::string>()); }
     if (filters.contains("name")) { sql += " AND LOCATE(BINARY ?,BINARY name)>0"; values.push_back(filters["name"].get<std::string>()); }
     const int limit = filters.value("limit", 100), offset = filters.value("offset", 0);

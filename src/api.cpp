@@ -25,7 +25,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.39.0";
+constexpr auto api_version = "1.41.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -192,6 +192,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         else if (std::regex_match(request.path, std::regex(R"(/daily-tasks/[^/]+)"))) timer_allow = "GET, HEAD, PATCH, DELETE, OPTIONS";
         else if (std::regex_match(request.path, std::regex(R"(/daily-tasks/[^/]+/checked)"))) timer_allow = "PUT, OPTIONS";
         if (request.path == "/events") timer_allow = "GET, HEAD, POST, OPTIONS";
+        else if (std::regex_match(request.path,std::regex(R"(/events/[^/]+/move)"))) timer_allow="POST, OPTIONS";
         else if (request.path == "/events/occurrences") timer_allow = "GET, HEAD, OPTIONS";
         else if (std::regex_match(request.path, std::regex(R"(/events/[^/]+)"))) timer_allow = "GET, HEAD, PATCH, DELETE, OPTIONS";
         if (std::regex_match(request.path, std::regex(R"(/pulse/subscriptions/[^/]+)"))) timer_allow = "POST, DELETE, OPTIONS";

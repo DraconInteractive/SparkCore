@@ -55,7 +55,7 @@ const std::vector<RoutePolicy>& route_policies(){
             add("GET",path,{permission+".read"});add("GET",path+"/{id}",{permission+".read"});
             add("POST",path,{permission+".write"});add("PATCH",path+"/{id}",{permission+".write"});add("DELETE",path+"/{id}",{permission+".write"});
         }
-        add("GET","/events/occurrences",{"events.read"});add("PUT","/daily-tasks/{id}/checked",{"tasks.write"});
+        add("POST","/events/{id}/move",{"events.write"});add("GET","/events/occurrences",{"events.read"});add("PUT","/daily-tasks/{id}/checked",{"tasks.write"});
         for(auto path:{"/files","/files/explorer","/files/drives","/files/directories","/files/{id}","/files/{id}/content"})add("GET",path,{"files.read"});
         add("POST","/files/downloads",{"files.read"});add("GET","/files/downloads/{id}",{"files.read"});add("GET","/files/downloads/{id}/content",{"files.read"});add("DELETE","/files/downloads/{id}",{"files.read"});
         add("POST","/files/drives",{"admin.storage"});add("DELETE","/files/drives/{letter}",{"admin.storage"});

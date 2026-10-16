@@ -62,6 +62,33 @@ int main() {
         auto first=create(input); const auto path="/events/"+first["id"].get<std::string>();
         check(first["occurs_at"]=="2026-09-19T00:00:00Z","UTC normalization");
         check(expect(client.Get(path),200)==first,"get created event");
+        check(first["calendar"]=="local","default local calendar");
+        auto shared_input=input;shared_input["calendar"]="shared";auto shared=create(shared_input);const auto shared_path="/events/"+shared["id"].get<std::string>();
+        check(expect(client.Get("/events"),200)["events"].size()==1,"shared excluded by default");
+        check(expect(client.Get("/events?calendar=local"),200)==expect(client.Get("/events"),200),"explicit local list");
+        check(expect(client.Get("/events?calendar=shared&place=Park&day=2026-09-19"),200)["events"]==json::array({shared}),"shared combined filters");
+        const std::string range="from=2026-09-19T00:00:00Z&to=2026-09-20T00:00:00Z";
+        check(expect(client.Get("/events/occurrences?calendar=shared&"+range),200)["occurrences"][0]["event"]["calendar"]=="shared","shared occurrences");
+        check(expect(client.Get("/events/occurrences?"+range),200)["occurrences"].size()==1,"default local occurrences");
+        expect(client.Get(shared_path+"?calendar=local"),409,"calendar_mismatch");
+        check(expect(client.Get(shared_path+"?calendar=shared"),200)==shared,"shared item assertion");
+        expect(client.Patch(path,R"({"calendar":"shared","name":"Should not change"})","application/json"),409,"calendar_mismatch");
+        expect(client.Patch(path+"?calendar=shared",R"({"name":"Should not change"})","application/json"),409,"calendar_mismatch");
+        check(expect(client.Patch(path,R"({"calendar":"local"})","application/json"),200)==first,"same calendar no-op");
+        expect(client.Delete(shared_path+"?calendar=local"),409,"calendar_mismatch");
+        expect(client.Patch(shared_path+"?calendar=shared",R"({"calendar":"local","name":"No"})","application/json"),400,"conflicting_calendar");
+        for(const auto& bad_calendar:json::array({"other","LOCAL","",nullptr,1})){
+            auto bad_input=input;bad_input["calendar"]=bad_calendar;expect(client.Post("/events",bad_input.dump(),"application/json"),400,"invalid_calendar");
+        }
+        expect(client.Get("/events?calendar=all"),400,"invalid_calendar");
+        expect(client.Get("/events?calendar=local&calendar=shared"),400,"duplicate_filter");
+        expect(client.Get(shared_path+"?calendar=shared&calendar=local"),400,"duplicate_filter");
+        expect(client.Get("/events/occurrences?calendar=bad&"+range),400,"invalid_calendar");
+        expect(client.Patch(shared_path,R"({"calendar":"shared","description":"Shared edit"})","application/json"),200);
+        expect(client.Delete(shared_path+"?calendar=shared"),204);
+        spark::NotificationStore separated_notifications(config);separated_notifications.sequence_events();bool saw_create=false,saw_update=false,saw_delete=false;unsigned long long separated_cursor=0;
+        for(;;){auto frames=separated_notifications.after(separated_cursor);if(frames.empty())break;for(const auto& frame:frames){separated_cursor=frame["sequence"];if(frame["resource"]==shared_path){check(frame["calendar"]=="shared","notification calendar");saw_create|=frame["type"]=="calendar.created";saw_update|=frame["type"]=="calendar.updated";saw_delete|=frame["type"]=="calendar.deleted";}}}
+        check(saw_create&&saw_update&&saw_delete,"shared mutation notifications");
         auto head=client.Head(path); check(head && head->status==200 && head->body.empty(),"event HEAD");
         auto options=client.Options(path); check(options && options->status==204 && options->get_header_value("Allow").find("PATCH")!=std::string::npos,"event OPTIONS");
         expect(client.Post(path,"{}","application/json"),405,"method_not_allowed");
@@ -173,7 +200,7 @@ int main() {
         expect(client.Post("/events",invalid.dump(),"application/json"),400,"invalid_reminder_minutes");
         invalid["reminder_minutes"]=1.5;
         expect(client.Post("/events",invalid.dump(),"application/json"),400,"invalid_reminder_minutes");
-        auto reminder=input; reminder["name"]="Reminder"; reminder["occurs_at"]=spark::calendar_timestamp(std::time(nullptr)+120); reminder["reminder_minutes"]=5;
+        auto reminder=input; reminder["calendar"]="shared"; reminder["name"]="Reminder"; reminder["occurs_at"]=spark::calendar_timestamp(std::time(nullptr)+120); reminder["reminder_minutes"]=5;
         const auto reminded=create(reminder); const auto rid=reminded["id"].get<std::string>();
         db.run("CREATE TRIGGER fail_reminder BEFORE INSERT ON events FOR EACH ROW BEGIN IF NEW.type='calendar.reminder' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='test'; END IF; END");
         bool failed=false; try {store->tick();} catch(const spark::DatabaseError&) {failed=true;}
@@ -186,7 +213,7 @@ int main() {
         check(db.count("SELECT COUNT(*) FROM events WHERE type='calendar.reminder' AND resource='/events/"+rid+"'")==1,"reminder state survives new store");
         spark::NotificationStore notifications(config); notifications.sequence_events();
         bool found=false; unsigned long long cursor=0;
-        for(;;) { auto frames=notifications.after(cursor); if(frames.empty()) break; for(const auto& frame:frames) {cursor=frame["sequence"]; if(frame["type"]=="calendar.reminder" && frame["resource"]=="/events/"+rid) {check(frame["occurrence_at"]==reminded["occurs_at"],"reminder notification occurrence"); found=true;}} }
+        for(;;) { auto frames=notifications.after(cursor); if(frames.empty()) break; for(const auto& frame:frames) {cursor=frame["sequence"]; if(frame["type"]=="calendar.reminder" && frame["resource"]=="/events/"+rid) {check(frame["occurrence_at"]==reminded["occurs_at"]&&frame["calendar"]=="shared","shared reminder notification occurrence"); found=true;}} }
         check(found,"reminder in notification channel");
         expect(client.Patch("/events/"+rid,R"({"reminder_minutes":null})","application/json"),200);
         auto channel=std::make_shared<spark::NotificationStore>(config); channel->sequence_events();
@@ -198,14 +225,14 @@ int main() {
           check(frame["resource"]=="/events/"+zero_event["id"].get<std::string>() && frame["occurrence_at"]==zero_event["occurs_at"],"scheduler TCP reminder including zero-minute grace"); }
         auto recurring_reminder=zero;
         const auto next_time=std::time(nullptr)+120;
-        recurring_reminder["name"]="Recurring TCP reminder";
+        recurring_reminder["name"]="Recurring TCP reminder";recurring_reminder["calendar"]="shared";
         recurring_reminder["occurs_at"]=spark::calendar_timestamp(next_time);
         recurring_reminder["reminder_minutes"]=5;
         const auto perth=next_time+28800;std::tm local{};gmtime_r(&perth,&local);
         recurring_reminder["recurrence"]={{"weekdays",json::array({(local.tm_wday+6)%7+1})},{"start_date",spark::calendar_timestamp(perth).substr(0,10)}};
         const auto recurring_due=create(recurring_reminder);
         { spark::CalendarScheduler scheduler(store);const auto frame=peer.until("calendar.reminder");
-          check(frame["resource"]=="/events/"+recurring_due["id"].get<std::string>() && frame["occurrence_at"]==recurring_due["occurs_at"],"recurring advance reminder delivered over TCP"); }
+          check(frame["resource"]=="/events/"+recurring_due["id"].get<std::string>() && frame["occurrence_at"]==recurring_due["occurs_at"],"recurring advance reminder delivered over TCP");check(frame["calendar"]=="shared","shared recurring TCP calendar"); }
         // The observer and scheduler must already be running before creation.
         // Previous TCP checks only exercised reminders due on the first sweep.
         {
@@ -225,6 +252,43 @@ int main() {
 
         auto disabled=expect(client.Patch("/events/"+series["id"].get<std::string>(),R"({"recurrence":null})","application/json"),200);
         check(disabled["recurrence"].is_null(),"disable recurrence");
+        // Moving an already-reminded recurring series must not re-arm its reminder.
+        const auto move_id=recurring_due["id"].get<std::string>();
+        const auto move_path="/events/"+move_id+"/move";
+        const auto before_move=*store->get(move_id);
+        const auto resource_sql="SELECT COUNT(*) FROM events WHERE type='calendar.updated' AND resource='/events/"+move_id+"'";
+        const auto before_count=db.count(resource_sql);
+        const std::string move_body=R"({"calendar":"local","from_calendar":"shared","source_device":"watch-1"})";
+        const auto moved=expect(client.Post(move_path,move_body,"application/json"),200);
+        auto preserved=moved;preserved["calendar"]=before_move["calendar"];preserved["updated_at"]=before_move["updated_at"];
+        check(preserved==before_move,"move preserves full series and reminder state");
+        check(moved["calendar"]=="local","move destination");
+        check(expect(client.Get("/events?calendar=shared&name=Recurring%20TCP%20reminder"),200)["events"].empty(),"source list excludes moved series");
+        check(expect(client.Get("/events?calendar=local&name=Recurring%20TCP%20reminder"),200)["events"]==json::array({moved}),"destination lists moved series");
+        check(expect(client.Post(move_path,move_body,"application/json"),200)==moved,"move retry is unchanged");
+        check(db.count(resource_sql)==before_count+1,"retry emits no duplicate");
+        expect(client.Post(move_path,R"({"calendar":"shared","from_calendar":"shared"})","application/json"),409,"calendar_mismatch");
+        expect(client.Post(move_path,R"({"calendar":"other"})","application/json"),400,"invalid_calendar");
+        expect(client.Post(move_path,R"({})","application/json"),400,"invalid_calendar");
+        expect(client.Post(move_path,R"({"calendar":"shared","name":"No"})","application/json"),400,"unknown_field");
+        expect(client.Post("/events/00000000-0000-0000-0000-000000000000/move",move_body,"application/json"),404,"event_not_found");
+        db.run("CREATE TRIGGER fail_calendar_move BEFORE INSERT ON events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='move rollback'");
+        expect(client.Post(move_path,R"({"calendar":"shared"})","application/json"),503,"database_unavailable");
+        db.run("DROP TRIGGER fail_calendar_move");
+        check(*store->get(move_id)==moved,"outbox failure rolls back move");
+        expect(client.Post(move_path,R"({"calendar":"shared","from_calendar":"local"})","application/json"),200);
+        store->tick();
+        check(db.count("SELECT COUNT(*) FROM events WHERE type='calendar.reminder' AND resource='/events/"+move_id+"'")==1,"move does not repeat delivered reminder");
+        notifications.sequence_events();cursor=0;unsigned moves_seen=0;
+        for(;;){auto frames=notifications.after(cursor);if(frames.empty())break;for(const auto& frame:frames){
+            cursor=frame["sequence"];
+            if(frame["type"]=="calendar.updated"&&frame["resource"]=="/events/"+move_id&&frame.contains("previous_calendar")){
+                check(frame["calendar"]!=frame["previous_calendar"],"notification identifies both calendars");
+                check(frame["previous_calendar"]=="local"||frame["previous_calendar"]=="shared","previous calendar is plain string");
+                ++moves_seen;
+            }
+        }}
+        check(moves_seen==2,"both moves available through notification replay");
         std::cout<<"Calendar CRUD, recurrence, Perth boundaries, reminder rollback/deduplication and TCP scheduler passed\n";
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; result=1; }
     server.stop(); thread.join(); return result;

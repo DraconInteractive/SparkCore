@@ -14,9 +14,10 @@ public:
     void verify() const;
     void tick() const;
     nlohmann::json create(const nlohmann::json& packet) const;
-    std::optional<nlohmann::json> get(const std::string& id) const;
-    std::optional<nlohmann::json> patch(const std::string& id, const nlohmann::json& packet) const;
-    bool remove(const std::string& id) const;
+    std::optional<nlohmann::json> get(const std::string& id, const std::optional<std::string>& calendar = std::nullopt) const;
+    std::optional<nlohmann::json> patch(const std::string& id, const nlohmann::json& packet, const std::optional<std::string>& calendar = std::nullopt) const;
+    std::optional<nlohmann::json> move(const std::string& id, const nlohmann::json& packet) const;
+    bool remove(const std::string& id, const std::optional<std::string>& calendar = std::nullopt) const;
     nlohmann::json list(const nlohmann::json& filters, bool expand = false) const;
 private:
     DatabaseConfig config_;

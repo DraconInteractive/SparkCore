@@ -249,3 +249,12 @@ GET /files/drives and refresh `/files/directories?drive=<letter>`; directory tre
 are independent per drive.
 Older replayed directory events may omit `drive_id`; refresh every registered
 drive tree in that case. Full reconnect resync should also enumerate all drives.
+
+Calendar notifications (`calendar.created`, `calendar.updated`, `calendar.deleted`,
+and `calendar.reminder`) include `calendar: "local" | "shared"`. Legacy replay
+records without that field are treated as local. Calendar selection does not
+change notification permissions or subscriptions.
+
+An event move emits `calendar.updated` with `calendar` (destination) and
+`previous_calendar` (source). Refresh both calendars; the event UUID remains
+unchanged. A move to its current calendar emits no notification.

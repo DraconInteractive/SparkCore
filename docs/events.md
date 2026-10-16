@@ -236,3 +236,55 @@ It uses the existing recurrence rules, including Perth weekdays, alternate weeks
 inclusive recurrence end dates, and the anchor lower bound. `/events` and
 `/events/{id}` retain their existing series semantics. No migration is required
 for this endpoint: rebuild and restart SPARK. It also appears in `/api/docs`.
+
+## Fixed local and shared calendars
+
+Events belong to `local` or `shared`. There are no calendar creation/deletion
+endpoints. Existing events become `local` when migration
+`sql/020_event_calendars.sql` runs; IDs, recurrence, and reminder state are retained.
+Run `./scripts/setup-db.sh` before starting the updated server.
+
+- `POST /events`: optional `"calendar":"shared"` (or `"local"`) in the JSON body;
+  omitted means `local`. Null, other names, and non-string values are invalid.
+- `GET /events` and `GET /events/occurrences`: `?calendar=local|shared`, default
+  `local`. Existing date/name/place filters and pagination apply within that calendar.
+  Query both calendars separately if a client wants to display both.
+- Every event record includes `calendar`, including parent records in occurrences.
+- `GET`, `PATCH`, and `DELETE /events/{id}` accept an optional `?calendar=...`
+  assertion. Without it, the UUID identifies the event in either calendar.
+- `PATCH` also accepts `calendar` in its JSON body as an assertion. It cannot move
+  an event. A mismatch with the stored calendar returns 409 `calendar_mismatch`,
+  with no mutation or notification. Conflicting query/body assertions return 400
+  `conflicting_calendar`. Missing IDs still return 404.
+
+Both calendars schedule reminders normally. TCP `calendar.created`,
+`calendar.updated`, `calendar.deleted`, and `calendar.reminder` messages include
+a top-level `calendar` field, including replay. Old notifications without a
+calendar are reported as `local`. Existing `events.read`/`events.write` permissions
+apply to both calendars: local/shared is a data partition, not an access boundary.
+`shared` currently labels data only; synchronization is not implemented yet.
+
+
+## Moving an event between calendars
+
+Send `POST /events/{id}/move` with `Content-Type: application/json`:
+
+```json
+{"calendar":"shared","from_calendar":"local","source_device":"watch-1"}
+```
+
+Only `calendar` (the destination) is required. `from_calendar` is an optional
+source assertion; `source_device` follows normal device attribution rules.
+The operation requires `events.write` and returns 200 with the full updated event.
+It moves the entire series, preserving its ID, schedule, recurrence, creation
+time and reminder delivery state. Previously delivered reminders are not re-armed.
+
+An event already at the destination returns unchanged, without a notification,
+even when a retry includes the original `from_calendar`. Otherwise a mismatched
+source returns 409 `calendar_mismatch`. Missing events return 404
+`event_not_found`; invalid calendars return 400 `invalid_calendar`.
+
+Each actual move atomically emits `calendar.updated` with the destination
+`calendar` and `previous_calendar`. Clients should refresh both calendars.
+Ordinary PATCH requests continue to treat `calendar` as an assertion.
+No additional database migration is required beyond calendar separation (020).

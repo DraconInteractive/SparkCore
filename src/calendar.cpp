@@ -99,12 +99,33 @@ CalendarScheduler::CalendarScheduler(std::shared_ptr<CalendarStore> store) {
 }
 CalendarScheduler::~CalendarScheduler() { {std::lock_guard<std::mutex> lock(mutex_); stopping_=true;} wake_.notify_all(); worker_.join(); }
 void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> store, std::shared_ptr<Authorization> auth) {
+    body_route(server,"POST",R"(/events/([^/]+)/move)",[store](const httplib::Request& request,httplib::Response& response){
+        auto reply=[&](int status,const json& body){response.status=status;response.set_content(body.dump(),"application/json");};
+        const auto id=request.matches[1].str();
+        if(!std::regex_match(id,std::regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))){reply(400,{{"error","invalid_event_id"}});return;}
+        if(!request.params.empty()){reply(400,{{"error","unknown_filter"}});return;}
+        if(request.get_header_value("Content-Type").substr(0,request.get_header_value("Content-Type").find(';'))!="application/json"){reply(415,{{"error","unsupported_media_type"}});return;}
+        auto p=json::parse(request.body,nullptr,false);if(!p.is_object()){reply(400,{{"error","invalid_packet"}});return;}
+        for(auto& f:p.items())if(f.key()!="calendar"&&f.key()!="from_calendar"&&f.key()!="source_device"){reply(400,{{"error","unknown_field"}});return;}
+        if(!p.contains("calendar")||(p["calendar"]!="local"&&p["calendar"]!="shared")||(p.contains("from_calendar")&&p["from_calendar"]!="local"&&p["from_calendar"]!="shared")){reply(400,{{"error","invalid_calendar"}});return;}
+        if(p.contains("source_device")&&!p["source_device"].is_null()&&(!p["source_device"].is_string()||!std::regex_match(p["source_device"].get<std::string>(),std::regex("[A-Za-z0-9_-]{1,64}")))){reply(400,{{"error","invalid_source_device"}});return;}
+        try{auto event=store->move(id,p);if(event)reply(200,*event);else reply(404,{{"error","event_not_found"}});}
+        catch(const std::invalid_argument&){reply(409,{{"error","calendar_mismatch"}});}
+        catch(const DatabaseError&){reply(503,{{"error","database_unavailable"}});}
+    },auth);
     auto handler = [store](const httplib::Request& request, httplib::Response& response) {
         auto reply = [&](int status, const json& body) { response.status = status; response.set_content(body.dump(2) + "\n", "application/json"); };
         auto bad = [&](const char* code) { reply(400, {{"error", code}}); };
         const bool occurrences = request.path == "/events/occurrences";
         const bool collection = request.path == "/events" || occurrences;
         std::string id;
+        std::optional<std::string> expected_calendar;
+        if(!collection){for(const auto& [key,value]:request.params){
+            if(key!="calendar"){bad("unknown_filter");return;}
+            if(expected_calendar){bad("duplicate_filter");return;}
+            if(value!="local"&&value!="shared"){bad("invalid_calendar");return;}
+            expected_calendar=value;
+        }}
         if (!collection) {
             id = request.matches[1].str();
             if (!std::regex_match(id, std::regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))) { bad("invalid_event_id"); return; }
@@ -113,7 +134,9 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
         if (collection && (request.method == "GET" || request.method == "HEAD")) {
             for (const auto& [key, value] : request.params) {
                 if (filters.contains(key)) { bad("duplicate_filter"); return; }
-                if (key == "from" || key == "to") {
+                if(key=="calendar"){
+                    if(value!="local"&&value!="shared"){bad("invalid_calendar");return;}filters[key]=value;
+                } else if (key == "from" || key == "to") {
                     auto normalized = timestamp(value);
                     if (!normalized) { bad("invalid_datetime"); return; }
                     filters[key] = *normalized;
@@ -133,15 +156,18 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
             if (occurrences && (!filters.contains("from") || !filters.contains("to"))) { bad("missing_range"); return; }
             if (filters.contains("from") && filters.contains("to") && filters["from"].get<std::string>() >= filters["to"].get<std::string>()) { bad("invalid_range"); return; }
         }
+        if(request.method=="POST"&&!request.params.empty()){bad("unknown_filter");return;}
         if (request.method == "POST" || request.method == "PATCH") {
             const auto type = request.get_header_value("Content-Type");
             if (type.substr(0, type.find(';')) != "application/json") { reply(415, {{"error", "unsupported_media_type"}}); return; }
             packet = json::parse(request.body, nullptr, false);
             if (!packet.is_object()) { bad("invalid_packet"); return; }
+            if(packet.contains("calendar")&&(packet["calendar"]!="local"&&packet["calendar"]!="shared")){bad("invalid_calendar");return;}
+            if(expected_calendar&&packet.contains("calendar")&&packet["calendar"]!=*expected_calendar){bad("conflicting_calendar");return;}
             bool has_field = false;
             for (const auto& field : packet.items()) {
                 if (field.key() == "source_device") continue;
-                if (field.key() != "name" && field.key() != "description" && field.key() != "occurs_at" && field.key() != "place" && field.key() != "recurrence" && field.key() != "reminder_minutes") { bad("unknown_field"); return; }
+                if (field.key() != "calendar" && field.key() != "name" && field.key() != "description" && field.key() != "occurs_at" && field.key() != "place" && field.key() != "recurrence" && field.key() != "reminder_minutes") { bad("unknown_field"); return; }
                 has_field = true;
             }
             if (!has_field || (request.method == "POST" && (!packet.contains("name") || !packet.contains("description") || !packet.contains("occurs_at")))) { bad("missing_fields"); return; }
@@ -182,26 +208,26 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
                 response.set_header("Location", "/events/" + event["id"].get<std::string>());
                 reply(201, event);
             } else if (request.method == "DELETE") {
-                if (!store->remove(id)) reply(404, {{"error", "event_not_found"}});
+                if (!store->remove(id,expected_calendar)) reply(404, {{"error", "event_not_found"}});
                 else response.status = 204;
             } else if (collection) reply(200, store->list(filters, occurrences));
             else {
-                const auto event = request.method == "PATCH" ? store->patch(id, packet) : store->get(id);
+                const auto event = request.method == "PATCH" ? store->patch(id, packet,expected_calendar) : store->get(id,expected_calendar);
                 if (!event) reply(404, {{"error", "event_not_found"}}); else reply(200, *event);
             }
-        } catch (const std::invalid_argument& error) { bad(error.what()); } catch (const DatabaseError&) { reply(503, {{"error", "database_unavailable"}}); }
+        } catch (const std::invalid_argument& error) { if(std::string(error.what())=="calendar_mismatch")reply(409,{{"error","calendar_mismatch"}});else bad(error.what()); } catch (const DatabaseError&) { reply(503, {{"error", "database_unavailable"}}); }
     };
     body_route(server,"POST","/events",handler,auth); server.Get("/events", handler);
     server.Get("/events/occurrences", handler);
     server.Get(R"(/events/([^/]+))", handler); body_route(server,"PATCH",R"(/events/([^/]+))",handler,auth); body_route(server,"DELETE",R"(/events/([^/]+))",handler,auth);
 }
 json calendar_endpoints() {
-    const json event = {{"id", "12345678-1234-1234-1234-123456789abc"}, {"name", "Walk"}, {"description", "Meet at the entrance"},
+    const json event = {{"id", "12345678-1234-1234-1234-123456789abc"}, {"calendar", "local"}, {"name", "Walk"}, {"description", "Meet at the entrance"},
         {"occurs_at", "2026-09-19T01:00:00Z"}, {"place", "Park"}, {"recurrence", nullptr}, {"reminder_minutes", nullptr}, {"last_reminder_occurs_at", nullptr}, {"created_at", "2026-09-18T00:00:00.000000Z"}, {"updated_at", "2026-09-18T00:00:00.000000Z"}};
     json endpoints = json::array();
     for (const std::string operation : {"create", "list", "get", "patch", "delete"}) {
         const bool list = operation == "list", remove = operation == "delete", create = operation == "create", write = create || operation == "patch";
-        const json input_fields = {{"name", "nonblank string, max 200 UTF-8 bytes"}, {"description", "string, max 4000 UTF-8 bytes; may be empty"},
+        const json input_fields = {{"calendar", "local or shared; POST defaults to local. PATCH is an expected-calendar assertion, not a move; mismatch returns 409."}, {"name", "nonblank string, max 200 UTF-8 bytes"}, {"description", "string, max 4000 UTF-8 bytes; may be empty"},
             {"occurs_at", "YYYY-MM-DDTHH:MM:SSZ or explicit +/-HH:MM offset (max 14:00); normalized to UTC; years 1000..9999"},
             {"recurrence", "null (one-off) or weekly rule: frequency=weekly, interval_weeks=1..52 (default 1), weekdays=distinct ISO weekdays 1 Monday..7 Sunday, start_date=YYYY-MM-DD, end_date=inclusive YYYY-MM-DD or null, timezone=+08:00. Monday-based weeks anchored to start_date. occurs_at sets Perth clock time and earliest occurrence. PATCH replaces whole rule; null clears it."},
             {"reminder_minutes", "optional integer 0..10080 before each occurrence; null disables. TCP calendar.reminder includes occurrence_at. At most once per occurrence; schedule changes reset delivery state."},
@@ -214,27 +240,32 @@ json calendar_endpoints() {
                 operation == "patch" ? "Partially modify an event. Omitted fields retained; place:null clears the place. Identical updates do not emit notifications." : "Retrieve a dated event by UUID."},
             {"input", {{"path", create || list ? json::object() : json{{"id", "lowercase UUID from creation response"}}},
                 {"headers", write ? json{{"Content-Type", "application/json"}} : json::object()},
-                {"query", list ? json{{"place", "exact case-sensitive place"}, {"name", "literal case-sensitive name substring"}, {"day", "UTC calendar date YYYY-MM-DD"},
-                    {"from", "inclusive timestamp, explicit zone required"}, {"to", "exclusive timestamp, explicit zone required"}, {"limit", "1..500; default 100"}, {"offset", "0..1000000; default 0"}} : json::object()},
-                {"fields", write ? input_fields : json::object()}, {"body", write ? json{{"name", "Walk"}, {"description", "Meet at the entrance"}, {"occurs_at", "2026-09-19T09:00:00+08:00"}, {"place", "Park"}} : json(nullptr)},
+                {"query", list ? json{{"calendar", "local or shared; default local"}, {"place", "exact case-sensitive place"}, {"name", "literal case-sensitive name substring"}, {"day", "UTC calendar date YYYY-MM-DD"},
+                    {"from", "inclusive timestamp, explicit zone required"}, {"to", "exclusive timestamp, explicit zone required"}, {"limit", "1..500; default 100"}, {"offset", "0..1000000; default 0"}} : create ? json::object() : json{{"calendar","optional expected calendar: local or shared; mismatch returns 409"}}},
+                {"fields", write ? input_fields : json::object()}, {"body", write ? json{{"calendar", "local"}, {"name", "Walk"}, {"description", "Meet at the entrance"}, {"occurs_at", "2026-09-19T09:00:00+08:00"}, {"place", "Park"}} : json(nullptr)},
                 {"validation", "Unknown fields/filters and duplicate filters rejected. PATCH needs at least one editable field. Query '+' offsets must be URL encoded as %2B."}}},
             {"output", {{"status", create ? 201 : remove ? 204 : 200}, {"headers", remove ? json{{"Cache-Control", "no-store"}} : json{{"Content-Type", "application/json"}, {"Cache-Control", "no-store"}}},
-                {"fields", remove ? json::object() : list ? json{{"events", "array of event records"}, {"limit", "page size"}, {"offset", "page offset"}, {"has_more", "boolean: another page exists"}} : json{{"id", "UUID"}, {"name", "string"}, {"description", "string"}, {"occurs_at", "UTC ISO 8601 timestamp"}, {"place", "string or null"}, {"recurrence", "weekly rule or null"}, {"reminder_minutes", "integer or null"}, {"last_reminder_occurs_at", "last reminded occurrence UTC timestamp or null"}, {"created_at", "UTC creation timestamp"}, {"updated_at", "UTC last-change timestamp"}}},
+                {"fields", remove ? json::object() : list ? json{{"events", "array of event records"}, {"limit", "page size"}, {"offset", "page offset"}, {"has_more", "boolean: another page exists"}} : json{{"id", "UUID"}, {"calendar", "local or shared"}, {"name", "string"}, {"description", "string"}, {"occurs_at", "UTC ISO 8601 timestamp"}, {"place", "string or null"}, {"recurrence", "weekly rule or null"}, {"reminder_minutes", "integer or null"}, {"last_reminder_occurs_at", "last reminded occurrence UTC timestamp or null"}, {"created_at", "UTC creation timestamp"}, {"updated_at", "UTC last-change timestamp"}}},
                 {"body", remove ? json(nullptr) : list ? json{{"events", json::array({event})}, {"limit", 100}, {"offset", 0}, {"has_more", false}} : event}}},
-            {"errors", {{"400", "invalid_event_id, invalid_packet, missing_fields, unknown_field, invalid_name, invalid_description, invalid_place, invalid_datetime, invalid_source_device, invalid_recurrence, invalid_reminder_minutes, unknown_filter, duplicate_filter, invalid_filter, invalid_day, invalid_range, invalid_pagination"}, {"404", "event_not_found"}, {"415", "unsupported_media_type"}, {"503", "database_unavailable"}}}
+            {"errors", {{"400", "invalid_calendar, conflicting_calendar, invalid_event_id, invalid_packet, missing_fields, unknown_field, invalid_name, invalid_description, invalid_place, invalid_datetime, invalid_source_device, invalid_recurrence, invalid_reminder_minutes, unknown_filter, duplicate_filter, invalid_filter, invalid_day, invalid_range, invalid_pagination"}, {"404", "event_not_found"}, {"409", "calendar_mismatch"}, {"415", "unsupported_media_type"}, {"503", "database_unavailable"}}}
         });
     }
     endpoints.push_back({
         {"method","GET"},{"path","/events/occurrences"},
         {"description","Expand one-off and recurring events into individual occurrences in [from,to), ordered by occurrence_at then event_id. Parent event occurs_at remains the original anchor. Read-only; no reminders are fired by this request."},
         {"input",{{"path",json::object()},{"headers",json::object()},{"body",nullptr},
-            {"query",{{"from","required inclusive ISO 8601 timestamp with explicit zone"},{"to","required exclusive ISO 8601 timestamp with explicit zone; must be after from"},{"name","optional literal case-sensitive name substring"},{"place","optional exact case-sensitive place"},{"limit","1..500; default 100"},{"offset","0..1000000; default 0"}}},
+            {"query",{{"calendar","local or shared; default local"},{"from","required inclusive ISO 8601 timestamp with explicit zone"},{"to","required exclusive ISO 8601 timestamp with explicit zone; must be after from"},{"name","optional literal case-sensitive name substring"},{"place","optional exact case-sensitive place"},{"limit","1..500; default 100"},{"offset","0..1000000; default 0"}}},
             {"validation","Unknown and duplicate filters rejected; day is not supported. Encode + offsets as %2B. Recurrence follows the stored Perth schedule."}}},
         {"output",{{"status",200},{"headers",{{"Content-Type","application/json"},{"Cache-Control","no-store"}}},
             {"fields",{{"occurrences","array of {event_id, occurrence_at, event}; event is the full parent record. Identify an instance by (event_id, occurrence_at)."},{"limit","page size"},{"offset","occurrences skipped"},{"has_more","another page exists; increment offset by limit. Concurrent edits may change pagination."}}},
             {"body",{{"occurrences",json::array({json{{"event_id",event["id"]},{"occurrence_at",event["occurs_at"]},{"event",event}}})},{"limit",100},{"offset",0},{"has_more",false}}}}},
-        {"errors",{{"400","missing_range, invalid_range, invalid_datetime, unknown_filter, duplicate_filter, invalid_filter, invalid_pagination"},{"503","database_unavailable"}}}
+        {"errors",{{"400","invalid_calendar, missing_range, invalid_range, invalid_datetime, unknown_filter, duplicate_filter, invalid_filter, invalid_pagination"},{"503","database_unavailable"}}}
     });
+    endpoints.push_back({{"method","POST"},{"path","/events/{id}/move"},
+        {"description","Move the entire event series between local and shared, retaining ID, schedule, recurrence and reminder delivery state. Requires events.write. Returns the event; emits calendar.updated with calendar and previous_calendar. Already at the destination is a successful no-op, including retries with the original from_calendar."},
+        {"input",{{"path",{{"id","event UUID"}}},{"headers",{{"Content-Type","application/json"}}},{"body",{{"calendar","shared"},{"from_calendar","local"}}},{"fields",{{"calendar","required destination: local or shared"},{"from_calendar","optional expected source; mismatches return 409 unless already at destination"},{"source_device","optional device attribution; normal ownership checks apply"}}}}},
+        {"output",{{"status",200},{"body",[&]{auto moved=event;moved["calendar"]="shared";return moved;}()}}},
+        {"errors",{{"400","invalid_event_id, invalid_packet, invalid_calendar, invalid_source_device, unknown_field, unknown_filter"},{"403","forbidden, device_identity_mismatch"},{"404","event_not_found"},{"409","calendar_mismatch"},{"415","unsupported_media_type"},{"503","database_unavailable"}}}});
     return endpoints;
 }
 }
