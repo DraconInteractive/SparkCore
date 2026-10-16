@@ -6,7 +6,7 @@ from remote_proxy import RemoteProxy,free_port
 assert os.environ.get('SPARK_DB_NAME','').startswith('spark_test_')
 assert os.environ.get('SPARK_TEST_NGINX'), 'Select real nginx fixture'
 mysql=['mariadb','--no-defaults','--socket='+os.environ['SPARK_DB_SOCKET'],'--user=root']
-repo=Path.cwd(); processes=[]; proxy=None; databases=[]
+repo=Path.cwd(); processes=[]; proxy=None; databases=[]; mounted_fixture=None
 def sql(query,db=None):subprocess.run(mysql+([db] if db else []),input=query,text=True,check=True,stdout=subprocess.DEVNULL)
 def call(port,path,method='GET',body=None,token=None,status=200,raw=None):
     headers={'Authorization':'Bearer '+token} if token else {}
@@ -119,8 +119,27 @@ try:
         assert not local('/backups/jobs')['jobs']
         # Attach another storage location, copy, then verified move.
         other=root/'other';other.mkdir();drive=local('/files/drives','POST',{'path':str(other)},201)['letter']
+        # Shared permissions are accepted, but symlinks and unwritable destinations are rejected.
+        destination=other/'.spark-backups';outside=root/'outside';outside.mkdir();destination.symlink_to(outside,target_is_directory=True)
+        blocked=job({'action':'copy','drive':drive});failure=wait(lambda:completed(blocked));assert failure['state']=='failed' and failure['error']=='unsafe_backup_directory',failure
+        assert source.exists() and not list(outside.iterdir());destination.unlink();destination.mkdir(mode=0o775);destination.chmod(0o775)
+        destination.chmod(0o555)
+        blocked=job({'action':'move','drive':drive});failure=wait(lambda:completed(blocked));assert failure['state']=='failed' and failure['error']=='destination_not_writable',failure
+        assert source.exists();destination.chmod(0o775)
+        incomplete=destination/('.incomplete-'+first);incomplete.mkdir(mode=0o775);incomplete.chmod(0o775)
         jid=job({'action':'copy','drive':drive});result=wait(lambda:completed(jid));assert result['state']=='succeeded',result
         assert source.exists() and (other/'.spark-backups'/first).exists()
+        assert 'shared or mount-controlled' in result['warning']
+        assert destination.stat().st_mode & 0o777 == 0o775
+        if os.environ.get('SPARK_TEST_SHARED_DRIVE'):
+            mounted_fixture=tempfile.TemporaryDirectory(prefix='.spark-backup-check-',dir=os.environ['SPARK_TEST_SHARED_DRIVE'])
+            mounted=mounted_fixture.name
+            mounted_drive=local('/files/drives','POST',{'path':mounted},201)['letter']
+            mounted_job=job({'action':'copy','drive':mounted_drive});mounted_result=wait(lambda:completed(mounted_job))
+            assert mounted_result['state']=='succeeded',mounted_result
+            assert mounted_result.get('warning'),mounted_result
+            assert source.exists() and (Path(mounted)/'.spark-backups'/first).exists()
+            subprocess.run(['./scripts/verify-backup.sh',str(Path(mounted)/'.spark-backups'/first)],check=True,stdout=subprocess.DEVNULL)
         jid=job({'action':'move','drive':drive});assert wait(lambda:completed(jid))['state']=='succeeded';assert not source.exists()
         local('/backups/'+first,'DELETE',status=404)
         # A new local backup excludes previous backup archives on every drive.
@@ -166,5 +185,6 @@ except BaseException:
 finally:
     for proc in processes:proc.terminate()
     for proc in processes:proc.wait(timeout=70)
+    if mounted_fixture:mounted_fixture.cleanup()
     if proxy:proxy.close()
     for db in databases:sql('DROP DATABASE IF EXISTS '+db)

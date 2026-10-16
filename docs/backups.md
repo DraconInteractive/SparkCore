@@ -388,3 +388,12 @@ Queued/running jobs cannot be dismissed. There is no automatic pruning.
 The corresponding APIs are `DELETE /backups/jobs/{id}` and
 `DELETE /backups/jobs/completed`, both requiring `admin.backup` and returning
 `{"removed": N}`. Missing IDs return 404; active jobs return 409 `job_in_progress`.
+
+External copy/move destinations use the attached drive's access permissions,
+including group-writable mounts owned by another local user and FAT/exFAT mounts.
+SPARK creates directories with mode 0700 where supported, but accepts existing or
+mount-controlled permissions if a write probe succeeds. The transfer shows a
+notice when directories are not owner-only. Symlink directories are rejected;
+private control data and local backup storage retain their strict permission checks.
+No remount, ownership change, or broad chmod is performed. A move retains its
+source until destination verification and filesystem flushing succeed.
