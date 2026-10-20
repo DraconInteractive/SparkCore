@@ -13,6 +13,16 @@ public:
     explicit CalendarStore(DatabaseConfig config) : config_(std::move(config)) {}
     void verify() const;
     void tick() const;
+    nlohmann::json sync_info() const;
+    nlohmann::json sync_changes(uint64_t after, uint64_t through = 0) const;
+    nlohmann::json sync_item(const std::string& id) const;
+    nlohmann::json sync_apply(const nlohmann::json& packet) const;
+    nlohmann::json sync_state(const std::string& connection) const;
+    nlohmann::json sync_baseline(const std::string& connection,const std::string& id) const;
+    nlohmann::json sync_conflicts(const std::string& connection,uint64_t after) const;
+    void sync_finish(const std::string& connection,const std::string& id,const nlohmann::json& baseline,const nlohmann::json& state,const nlohmann::json& conflict=nullptr) const;
+    void sync_save(const std::string& connection, const nlohmann::json& state) const;
+
     nlohmann::json create(const nlohmann::json& packet) const;
     std::optional<nlohmann::json> get(const std::string& id, const std::optional<std::string>& calendar = std::nullopt) const;
     std::optional<nlohmann::json> patch(const std::string& id, const nlohmann::json& packet, const std::optional<std::string>& calendar = std::nullopt) const;
@@ -22,6 +32,8 @@ public:
 private:
     DatabaseConfig config_;
 };
+// Validate and normalize the six portable event fields; throws invalid_argument.
+nlohmann::json calendar_sync_data(nlohmann::json data);
 // First occurrence at or after the supplied UTC instant. Weekly rules use Perth time.
 std::optional<std::time_t> calendar_occurrence(const nlohmann::json& event, std::time_t from);
 std::time_t calendar_instant(const std::string& timestamp);

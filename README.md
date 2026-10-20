@@ -515,3 +515,10 @@ are persisted. Existing `admin.backup` credentials suffice; no migration is need
 
 Folder downloads: see [resumable ZIP64 downloads](docs/folder-downloads.md) for
 recursive explorer downloads, preparation, authentication and HTTP resume.
+
+
+Shared calendar synchronization is available through the existing
+SPARK connections explorer at `/connections/explorer`. Enable it on the initiating
+instance and use Sync now; the peer token needs `calendar.sync.read` and
+`calendar.sync.write`. See [calendar sync setup and protocol](docs/calendar-sync.md)
+for migration 021, conflicts, retries and calendar move behaviour.

@@ -262,7 +262,7 @@ Both calendars schedule reminders normally. TCP `calendar.created`,
 a top-level `calendar` field, including replay. Old notifications without a
 calendar are reported as `local`. Existing `events.read`/`events.write` permissions
 apply to both calendars: local/shared is a data partition, not an access boundary.
-`shared` currently labels data only; synchronization is not implemented yet.
+Shared calendars can synchronize through saved SPARK connections; see [calendar sync](calendar-sync.md).
 
 
 ## Moving an event between calendars

@@ -258,3 +258,8 @@ change notification permissions or subscriptions.
 An event move emits `calendar.updated` with `calendar` (destination) and
 `previous_calendar` (source). Refresh both calendars; the event UUID remains
 unchanged. A move to its current calendar emits no notification.
+
+Shared-calendar sync imports use the same calendar.created/updated/deleted
+notifications as ordinary changes. Imported data always has calendar=shared.
+An unchanged or retried import emits no duplicate notification. Reminder
+delivery markers remain local to each instance. See [calendar sync](calendar-sync.md).

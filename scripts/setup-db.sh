@@ -16,7 +16,7 @@ if [ "$db_user" = root ]; then echo 'Run this script as the SPARK service user, 
     cat sql/004_pulse.sql
     cat sql/005_pulse_subscriptions.sql
     cat sql/006_calendar.sql
-    cat sql/007_daily_tasks.sql sql/008_calendar_recurrence.sql sql/009_files.sql sql/010_file_directories.sql sql/011_projects.sql sql/012_project_hierarchy.sql sql/013_project_boards.sql sql/014_file_revisions.sql sql/015_commands.sql sql/016_storage_drives.sql sql/017_runtime_drives.sql sql/018_drive_directories.sql sql/019_command_administrators.sql sql/020_event_calendars.sql
+    cat sql/007_daily_tasks.sql sql/008_calendar_recurrence.sql sql/009_files.sql sql/010_file_directories.sql sql/011_projects.sql sql/012_project_hierarchy.sql sql/013_project_boards.sql sql/014_file_revisions.sql sql/015_commands.sql sql/016_storage_drives.sql sql/017_runtime_drives.sql sql/018_drive_directories.sql sql/019_command_administrators.sql sql/020_event_calendars.sql sql/021_calendar_sync.sql
     printf "GRANT SELECT, INSERT, UPDATE, DELETE ON spark.devices TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, INSERT ON spark.device_events TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, INSERT, UPDATE ON spark.timers TO '%s'@'localhost';\n" "$db_user"

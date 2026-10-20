@@ -86,6 +86,47 @@ std::optional<std::time_t> calendar_occurrence(const json& event, std::time_t fr
     }
     return std::nullopt;
 }
+namespace {
+void normalize_calendar_fields(json& packet) {
+    auto fail=[](const char* code){throw std::invalid_argument(code);};
+    if (packet.contains("name") && !text_field(packet["name"], 200, true)) { fail("invalid_name");  }
+    if (packet.contains("description") && !text_field(packet["description"], 4000)) { fail("invalid_description");  }
+    if (packet.contains("place") && !packet["place"].is_null() && !text_field(packet["place"], 200, true)) { fail("invalid_place");  }
+    if (packet.contains("reminder_minutes") && !packet["reminder_minutes"].is_null() &&
+        (!packet["reminder_minutes"].is_number_integer() || packet["reminder_minutes"] < 0 || packet["reminder_minutes"] > 10080)) { fail("invalid_reminder_minutes");  }
+    if (packet.contains("recurrence") && !packet["recurrence"].is_null()) {
+        auto& rule=packet["recurrence"];
+        if (!rule.is_object() || !rule.contains("weekdays") || !rule.contains("start_date")) { fail("invalid_recurrence");  }
+        for (const auto& field:rule.items()) if(field.key()!="frequency" && field.key()!="interval_weeks" && field.key()!="weekdays" && field.key()!="start_date" && field.key()!="end_date" && field.key()!="timezone") { fail("invalid_recurrence");  }
+        if (!rule.contains("frequency")) rule["frequency"]="weekly";
+        if (!rule.contains("interval_weeks")) rule["interval_weeks"]=1;
+        if (!rule.contains("end_date")) rule["end_date"]=nullptr;
+        if (!rule.contains("timezone")) rule["timezone"]="+08:00";
+        if (rule["frequency"]!="weekly" || rule["timezone"]!="+08:00" || !rule["interval_weeks"].is_number_integer() || rule["interval_weeks"]<1 || rule["interval_weeks"]>52 ||
+            !rule["start_date"].is_string() || !valid_day(rule["start_date"]) ||
+            (!rule["end_date"].is_null() && (!rule["end_date"].is_string() || !valid_day(rule["end_date"]) || rule["end_date"]<rule["start_date"])) ||
+            !rule["weekdays"].is_array() || rule["weekdays"].empty() || rule["weekdays"].size()>7) { fail("invalid_recurrence");  }
+        std::set<int> days;
+        for (const auto& day:rule["weekdays"]) {
+            if (!day.is_number_integer() || day<1 || day>7 || !days.insert(day.get<int>()).second) { fail("invalid_recurrence");  }
+        }
+        rule["weekdays"]=days;
+    }
+    if (packet.contains("occurs_at")) {
+        auto normalized = timestamp(packet["occurs_at"]);
+        if (!normalized) { fail("invalid_datetime");  }
+        packet["occurs_at"] = *normalized;
+    }
+}
+}
+json calendar_sync_data(json packet) {
+    if(!packet.is_object() || packet.size()!=6)throw std::invalid_argument("invalid_sync_data");
+    for(const auto* key:{"name","description","occurs_at","place","recurrence","reminder_minutes"})
+        if(!packet.contains(key))throw std::invalid_argument("invalid_sync_data");
+    normalize_calendar_fields(packet);
+    if(!calendar_occurrence(packet,calendar_instant(packet["occurs_at"])))throw std::invalid_argument("invalid_recurrence");
+    return packet;
+}
 CalendarScheduler::CalendarScheduler(std::shared_ptr<CalendarStore> store) {
     worker_=std::thread([this,store]{
         bool failed=false; std::unique_lock<std::mutex> lock(mutex_);
@@ -171,34 +212,8 @@ void configure_calendar(httplib::Server& server, std::shared_ptr<CalendarStore> 
                 has_field = true;
             }
             if (!has_field || (request.method == "POST" && (!packet.contains("name") || !packet.contains("description") || !packet.contains("occurs_at")))) { bad("missing_fields"); return; }
-            if (packet.contains("name") && !text_field(packet["name"], 200, true)) { bad("invalid_name"); return; }
-            if (packet.contains("description") && !text_field(packet["description"], 4000)) { bad("invalid_description"); return; }
-            if (packet.contains("place") && !packet["place"].is_null() && !text_field(packet["place"], 200, true)) { bad("invalid_place"); return; }
-            if (packet.contains("reminder_minutes") && !packet["reminder_minutes"].is_null() &&
-                (!packet["reminder_minutes"].is_number_integer() || packet["reminder_minutes"] < 0 || packet["reminder_minutes"] > 10080)) { bad("invalid_reminder_minutes"); return; }
-            if (packet.contains("recurrence") && !packet["recurrence"].is_null()) {
-                auto& rule=packet["recurrence"];
-                if (!rule.is_object() || !rule.contains("weekdays") || !rule.contains("start_date")) { bad("invalid_recurrence"); return; }
-                for (const auto& field:rule.items()) if(field.key()!="frequency" && field.key()!="interval_weeks" && field.key()!="weekdays" && field.key()!="start_date" && field.key()!="end_date" && field.key()!="timezone") { bad("invalid_recurrence"); return; }
-                if (!rule.contains("frequency")) rule["frequency"]="weekly";
-                if (!rule.contains("interval_weeks")) rule["interval_weeks"]=1;
-                if (!rule.contains("end_date")) rule["end_date"]=nullptr;
-                if (!rule.contains("timezone")) rule["timezone"]="+08:00";
-                if (rule["frequency"]!="weekly" || rule["timezone"]!="+08:00" || !rule["interval_weeks"].is_number_integer() || rule["interval_weeks"]<1 || rule["interval_weeks"]>52 ||
-                    !rule["start_date"].is_string() || !valid_day(rule["start_date"]) ||
-                    (!rule["end_date"].is_null() && (!rule["end_date"].is_string() || !valid_day(rule["end_date"]) || rule["end_date"]<rule["start_date"])) ||
-                    !rule["weekdays"].is_array() || rule["weekdays"].empty() || rule["weekdays"].size()>7) { bad("invalid_recurrence"); return; }
-                std::set<int> days;
-                for (const auto& day:rule["weekdays"]) {
-                    if (!day.is_number_integer() || day<1 || day>7 || !days.insert(day.get<int>()).second) { bad("invalid_recurrence"); return; }
-                }
-                rule["weekdays"]=days;
-            }
-            if (packet.contains("occurs_at")) {
-                auto normalized = timestamp(packet["occurs_at"]);
-                if (!normalized) { bad("invalid_datetime"); return; }
-                packet["occurs_at"] = *normalized;
-            }
+            try { normalize_calendar_fields(packet); }
+            catch(const std::invalid_argument& e){bad(e.what());return;}
             if (packet.contains("source_device") && !packet["source_device"].is_null() &&
                 (!packet["source_device"].is_string() || !std::regex_match(packet["source_device"].get<std::string>(), std::regex("[A-Za-z0-9_-]{1,64}")))) { bad("invalid_source_device"); return; }
         }

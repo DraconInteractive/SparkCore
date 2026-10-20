@@ -10,6 +10,7 @@
 #include "notifications.hpp"
 #include "pulse.hpp"
 #include "calendar.hpp"
+#include "calendar_sync.hpp"
 #include "daily_tasks.hpp"
 #include "files.hpp"
 #include "folder_downloads.hpp"
@@ -25,7 +26,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.41.0";
+constexpr auto api_version = "1.42.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -85,6 +86,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     for (const auto& endpoint : device_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : timer_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : pulse_endpoints()) discovery["endpoints"].push_back(endpoint);
+    for(const auto& endpoint:calendar_sync_endpoints())discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : calendar_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : daily_task_endpoints()) discovery["endpoints"].push_back(endpoint);
     discovery["endpoints"].push_back({
@@ -155,7 +157,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
             const auto value=request.get_header_value("Content-Length");std::uint64_t length=0;
             const auto parsed=std::from_chars(value.data(),value.data()+value.size(),length);
             if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || request.get_header_value_count("Content-Length")!=1 || request.has_header("Transfer-Encoding"))return reject(400,"invalid_content_length");
-            if(!upload && length>(text_edit?2097152:16384))return reject(413,"payload_too_large");
+            if(!upload && length>(text_edit?2097152:request.path=="/calendar-sync/apply"?65536:16384))return reject(413,"payload_too_large");
         }
         if(request.has_header("Transfer-Encoding") && request.method!="POST" && request.method!="PATCH" && request.method!="PUT" && request.method!="DELETE")return reject(400,"unexpected_body");
         std::string timer_allow;
@@ -191,6 +193,11 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         if (request.path == "/daily-tasks") timer_allow = "GET, HEAD, POST, OPTIONS";
         else if (std::regex_match(request.path, std::regex(R"(/daily-tasks/[^/]+)"))) timer_allow = "GET, HEAD, PATCH, DELETE, OPTIONS";
         else if (std::regex_match(request.path, std::regex(R"(/daily-tasks/[^/]+/checked)"))) timer_allow = "PUT, OPTIONS";
+        if(request.path=="/calendar-sync"||request.path=="/calendar-sync/changes"||std::regex_match(request.path,std::regex(R"(/calendar-sync/items/[^/]+)")))timer_allow="GET, HEAD, OPTIONS";
+        if(request.path=="/calendar-sync/apply")timer_allow="POST, OPTIONS";
+        if(std::regex_match(request.path,std::regex(R"(/connections/[0-9a-f]{32}/calendar-sync)")))timer_allow="GET, HEAD, PUT, OPTIONS";
+        if(std::regex_match(request.path,std::regex(R"(/connections/[0-9a-f]{32}/calendar-sync/run)")))timer_allow="POST, OPTIONS";
+        if(std::regex_match(request.path,std::regex(R"(/connections/[0-9a-f]{32}/calendar-sync/conflicts)")))timer_allow="GET, HEAD, OPTIONS";
         if (request.path == "/events") timer_allow = "GET, HEAD, POST, OPTIONS";
         else if (std::regex_match(request.path,std::regex(R"(/events/[^/]+/move)"))) timer_allow="POST, OPTIONS";
         else if (request.path == "/events/occurrences") timer_allow = "GET, HEAD, OPTIONS";
@@ -258,7 +265,8 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     if(!maintenance)maintenance=std::make_shared<Maintenance>();
     configure_dashboard(server, maintenance, auth);
     configure_backup_visibility(server,maintenance,auth);
-    configure_inter_spark(server,files,maintenance,auth);
+    configure_inter_spark(server,files,maintenance,auth,calendar);
+    configure_calendar_sync(server,calendar,auth);
     configure_commands(server, std::make_shared<CommandStore>(DatabaseConfig::from_environment()), auth);
     configure_devices(server, std::move(registry), auth);
     configure_timers(server, std::move(timers), auth);

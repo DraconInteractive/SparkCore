@@ -4,14 +4,14 @@
 namespace spark {
 // JSON routes remain bounded even though the file reader accepts arbitrary sizes.
 inline void body_route(httplib::Server& server, const std::string& method,
-                       const std::string& path, httplib::Server::Handler handler, std::shared_ptr<Authorization> auth=nullptr) {
+                       const std::string& path, httplib::Server::Handler handler, std::shared_ptr<Authorization> auth=nullptr, std::size_t max_bytes=16384) {
     auto domain=std::move(handler);
     handler=[domain,auth](const auto& request,auto& response){if(!auth||auth->body(request,response))domain(request,response);};
-    httplib::Server::HandlerWithContentReader reader=[handler](const auto& request,auto& response,const httplib::ContentReader& read) {
+    httplib::Server::HandlerWithContentReader reader=[handler,max_bytes](const auto& request,auto& response,const httplib::ContentReader& read) {
         auto reject=[&](int status,const char* message){response.status=status;response.set_header("Connection","close");response.set_content(message,"application/json");};
         if(request.is_multipart_form_data()) {reject(415,R"({"error":"unsupported_media_type"})");return;}
         std::string body; bool large=false;
-        if(!read([&](const char* data,std::size_t size){if(size>16384-body.size()){large=true;return false;}body.append(data,size);return true;})) {
+        if(!read([&](const char* data,std::size_t size){if(size>max_bytes-body.size()){large=true;return false;}body.append(data,size);return true;})) {
             reject(large?413:400,large?R"({"error":"payload_too_large"})":R"({"error":"invalid_body"})");return;
         }
         auto copied=request;copied.body=std::move(body);handler(copied,response);

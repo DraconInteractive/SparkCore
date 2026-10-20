@@ -27,6 +27,12 @@ const std::vector<RoutePolicy>& route_policies(){
         };
         for(auto path:{"/backups/new","/backups/progress","/admin/backup-status"})add("GET",path,{"admin.backup"});
         add("POST","/admin/backup-estimate",{"admin.backup"});
+        for(auto path:{"/calendar-sync","/calendar-sync/changes","/calendar-sync/items/{id}"})add("GET",path,{"calendar.sync.read"});
+        add("POST","/calendar-sync/apply",{"calendar.sync.write"});
+        add("GET","/connections/{id}/calendar-sync",{"admin.connections"});
+        add("PUT","/connections/{id}/calendar-sync",{"admin.connections"});
+        add("POST","/connections/{id}/calendar-sync/run",{"admin.connections"});
+        add("GET","/connections/{id}/calendar-sync/conflicts",{"admin.connections"});
         add("POST","/auth/verify",{});
         for(auto path:{"/backups","/backups/explorer","/backups/drives","/backups/jobs","/backups/{id}/files/{name}"})add("GET",path,{"admin.backup"});
         add("DELETE","/backups/jobs/completed",{"admin.backup"});add("DELETE","/backups/jobs/{id}",{"admin.backup"});add("DELETE","/backups/{id}",{"admin.backup"});add("POST","/backups/{id}/transfers",{"admin.backup"});add("POST","/backups/jobs/{id}/retry",{"admin.backup"});

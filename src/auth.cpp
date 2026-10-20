@@ -92,7 +92,7 @@ nlohmann::json read_json_object(const std::filesystem::path& path,const std::str
 const std::set<std::string>& permission_names() {
     static const std::set<std::string> names={
         "discovery.read","devices.read","devices.write","pulse.read","pulse.write",
-        "timers.read","timers.write","events.read","events.write","tasks.read","tasks.write",
+        "timers.read","timers.write","events.read","events.write","calendar.sync.read","calendar.sync.write","tasks.read","tasks.write",
         "files.read","files.write","projects.read","projects.write","boards.read","boards.write",
         "commands.read","commands.invoke","commands.advertise","commands.execute","notifications.read",
         "devices.delegate","admin.restart","admin.backup","admin.storage","admin.credentials","admin.connections"};

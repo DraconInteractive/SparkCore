@@ -179,6 +179,13 @@ try:
         assert local('/backups/jobs')['jobs']==history
         check_zip_restart()
         print('Backup estimates, live maintenance visibility, TLS login/CSRF, interrupted recovery, exclusion, verified transfers, retry and drive copy/move passed.')
+        from calendar_sync_checks import check_calendar_sync
+        def restart_sync_coordinator():
+            processes[0].terminate();processes[0].wait(timeout=10)
+            processes[0]=subprocess.Popen(['./build/spark_server','--config',str(a['config'])],env=env,stdout=log,stderr=log)
+            wait(ready)
+        check_calendar_sync(a,b,local,call,wait,proxy,mysql,restart_sync_coordinator)
+
 except BaseException:
     # Server output intentionally excludes credentials.
     raise

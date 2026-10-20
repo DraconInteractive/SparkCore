@@ -494,17 +494,47 @@ std::optional<json> read_calendar(Connection& connection, const std::string& id,
     auto rows = query.rows();
     return rows.empty() ? std::nullopt : std::optional<json>(rows[0]);
 }
+std::string sync_uuid(Connection& c) {
+    Statement q(c,"SELECT JSON_QUOTE(UUID())");q.execute();return q.rows()[0];
+}
+json sync_lock(Connection& c) {
+    Statement q(c,"SELECT JSON_OBJECT('instance_id',instance_id,'sequence',sequence) FROM calendar_sync_identity WHERE singleton=1 FOR UPDATE");
+    q.execute();auto rows=q.rows();if(rows.empty())throw DatabaseError("Calendar sync migration required");return rows[0];
+}
+json sync_portable(const json& event) {
+    json out;for(const auto* k:{"name","description","occurs_at","place","recurrence","reminder_minutes"})out[k]=event[k];return out;
+}
+const std::string sync_projection="JSON_OBJECT('sync_id',sync_id,'revision',revision,'sequence',sequence,'data',JSON_EXTRACT(data,'$'))";
+json sync_read(Connection& c,const std::string& id) {
+    Statement q(c,"SELECT "+sync_projection+" FROM calendar_sync_items WHERE sync_id=?",{id});q.execute();auto rows=q.rows();
+    return rows.empty()?json{{"sync_id",id},{"revision",nullptr},{"sequence",0},{"data",nullptr}}:rows[0];
+}
+// Caller holds the singleton lock until commit, so published sequence order is commit order.
+json sync_write(Connection& c,const std::string& id,const std::optional<std::string>& event_id,const json& data) {
+    Statement bump(c,"UPDATE calendar_sync_identity SET sequence=sequence+1 WHERE singleton=1");bump.execute();
+    Statement q(c,"INSERT INTO calendar_sync_items(sync_id,event_id,revision,sequence,data) SELECT ?,?,?,sequence,? FROM calendar_sync_identity WHERE singleton=1 ON DUPLICATE KEY UPDATE event_id=VALUES(event_id),revision=VALUES(revision),sequence=VALUES(sequence),data=VALUES(data)",
+        {id,event_id,sync_uuid(c),data.is_null()?std::nullopt:std::optional<std::string>(data.dump())});q.execute();return sync_read(c,id);
+}
+void sync_track(Connection& c,const json& event,bool removed=false) {
+    const auto id=event["id"].get<std::string>();
+    Statement q(c,"SELECT JSON_QUOTE(sync_id) FROM calendar_sync_items WHERE event_id=?",{id});q.execute();auto rows=q.rows();
+    if(removed||event["calendar"]!="shared") {
+        if(!rows.empty())sync_write(c,rows[0],std::nullopt,nullptr);
+    } else sync_write(c,rows.empty()?sync_uuid(c):rows[0].get<std::string>(),id,sync_portable(event));
+}
 std::string sql_datetime(std::string value) { value[10] = ' '; value.pop_back(); return value; }
 }
 void CalendarStore::verify() const {
     Connection connection(config_);
     Statement query(connection, "SELECT " + calendar_projection + " FROM calendar_events LIMIT 0");
     query.execute(); query.rows();
+    sync_info();
 }
 json CalendarStore::create(const json& packet) const {
     if (!calendar_occurrence(packet,calendar_instant(packet["occurs_at"]))) throw std::invalid_argument("invalid_recurrence");
     Connection connection(config_);
     Transaction transaction(connection);
+    sync_lock(connection);
     Statement uuid(connection, "SELECT JSON_QUOTE(UUID())");
     uuid.execute();
     const auto id = uuid.rows()[0].get<std::string>();
@@ -512,6 +542,7 @@ json CalendarStore::create(const json& packet) const {
         {id, packet["name"].get<std::string>(), packet["description"].get<std::string>(), sql_datetime(packet["occurs_at"]), nullable_string(packet.value("place", json(nullptr))), packet.value("recurrence",json(nullptr)).is_null()?std::nullopt:std::optional<std::string>(packet["recurrence"].dump()), packet.value("reminder_minutes",json(nullptr)).is_null()?std::nullopt:std::optional<std::string>(packet["reminder_minutes"].dump()), packet.value("calendar",std::string("local"))});
     insert.execute();
     auto record = *read_calendar(connection, id);
+    sync_track(connection,record);
     append_event(connection, "calendar.created", "/events/" + id, packet.value("source_device", json(nullptr)), record);
     transaction.commit();
     return record;
@@ -525,6 +556,7 @@ std::optional<json> CalendarStore::get(const std::string& id, const std::optiona
 std::optional<json> CalendarStore::patch(const std::string& id, const json& packet, const std::optional<std::string>& calendar) const {
     Connection connection(config_);
     Transaction transaction(connection);
+    sync_lock(connection);
     auto record = read_calendar(connection, id, true);
     if (!record) return std::nullopt;
     if((calendar&&(*record)["calendar"]!=*calendar)||(packet.contains("calendar")&&packet["calendar"]!=(*record)["calendar"]))throw std::invalid_argument("calendar_mismatch");
@@ -539,32 +571,133 @@ std::optional<json> CalendarStore::patch(const std::string& id, const json& pack
         {updated["name"].get<std::string>(), updated["description"].get<std::string>(), sql_datetime(updated["occurs_at"]), nullable_string(updated["place"]), updated["recurrence"].is_null()?std::nullopt:std::optional<std::string>(updated["recurrence"].dump()), updated["reminder_minutes"].is_null()?std::nullopt:std::optional<std::string>(updated["reminder_minutes"].dump()), id});
     update.execute();
     record = read_calendar(connection, id);
+    sync_track(connection,*record);
     append_event(connection, "calendar.updated", "/events/" + id, packet.value("source_device", json(nullptr)), *record);
     transaction.commit();
     return record;
 }
 std::optional<json> CalendarStore::move(const std::string& id, const json& packet) const {
     Connection connection(config_);Transaction transaction(connection);
+    sync_lock(connection);
     auto record=read_calendar(connection,id,true);if(!record)return std::nullopt;
     if((*record)["calendar"]==packet["calendar"]){transaction.commit();return record;}
     if(packet.contains("from_calendar")&&packet["from_calendar"]!=(*record)["calendar"])throw std::invalid_argument("calendar_mismatch");
     const auto previous=(*record)["calendar"];
     Statement update(connection,"UPDATE calendar_events SET calendar=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{packet["calendar"].get<std::string>(),id});update.execute();
-    record=read_calendar(connection,id);auto payload=*record;payload["previous_calendar"]=previous;
+    record=read_calendar(connection,id);sync_track(connection,*record);auto payload=*record;payload["previous_calendar"]=previous;
     append_event(connection,"calendar.updated","/events/"+id,packet.value("source_device",json(nullptr)),payload);
     transaction.commit();return record;
 }
 bool CalendarStore::remove(const std::string& id, const std::optional<std::string>& calendar) const {
     Connection connection(config_);
     Transaction transaction(connection);
+    sync_lock(connection);
     auto record = read_calendar(connection, id, true);
     if (!record) return false;
     if(calendar&&(*record)["calendar"]!=*calendar)throw std::invalid_argument("calendar_mismatch");
     Statement remove(connection, "DELETE FROM calendar_events WHERE id=?", {id});
     remove.execute();
+    sync_track(connection,*record,true);
     append_event(connection, "calendar.deleted", "/events/" + id, nullptr, *record);
     transaction.commit();
     return true;
+}
+json CalendarStore::sync_info() const {
+    Connection c(config_);Transaction tx(c);auto info=sync_lock(c);tx.commit();info["protocol"]=1;return info;
+}
+json CalendarStore::sync_changes(uint64_t after,uint64_t through) const {
+    Connection c(config_);Transaction tx(c);auto info=sync_lock(c);uint64_t latest=info["sequence"];
+    if(!through)through=latest;
+    if(after>through||through>latest)throw std::invalid_argument("invalid_cursor");
+    Statement q(c,"SELECT "+sync_projection+" FROM calendar_sync_items WHERE sequence>? AND sequence<=? ORDER BY sequence LIMIT 50",{std::to_string(after),std::to_string(through)});
+    q.execute();auto items=q.rows();uint64_t next=items.empty()?through:items.back()["sequence"].get<uint64_t>();
+    bool more=items.size()==50&&next<through;
+    if(!more)next=through;
+    tx.commit();return {{"instance_id",info["instance_id"]},{"items",items},{"through",through},{"next",next},{"has_more",more}};
+}
+json CalendarStore::sync_item(const std::string& id) const {
+    Connection c(config_);return sync_read(c,id);
+}
+json CalendarStore::sync_apply(const json& input) const {
+    auto packet=input;
+    const std::regex uuid("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+    if(!packet.is_object()||packet.size()!=6)throw std::invalid_argument("invalid_sync_packet");
+    for(const auto* k:{"instance_id","coordinator_id","operation_id","sync_id"})
+        if(!packet.contains(k)||!packet[k].is_string()||!std::regex_match(packet[k].get<std::string>(),uuid))throw std::invalid_argument("invalid_sync_packet");
+    if(!packet.contains("expected_revision")||(!packet["expected_revision"].is_null()&&(!packet["expected_revision"].is_string()||!std::regex_match(packet["expected_revision"].get<std::string>(),uuid))))throw std::invalid_argument("invalid_sync_packet");
+    if(!packet.contains("data"))throw std::invalid_argument("invalid_sync_packet");
+    if(!packet["data"].is_null())packet["data"]=calendar_sync_data(packet["data"]);
+    Connection c(config_);Transaction tx(c);auto info=sync_lock(c);
+    if(packet["instance_id"]!=info["instance_id"])throw std::invalid_argument("instance_identity_mismatch");
+    Statement receipt(c,"SELECT JSON_OBJECT('request',JSON_EXTRACT(request,'$'),'response',JSON_EXTRACT(response,'$')) FROM calendar_sync_receipts WHERE coordinator_id=? AND operation_id=?",{packet["coordinator_id"].get<std::string>(),packet["operation_id"].get<std::string>()});
+    receipt.execute();auto receipts=receipt.rows();
+    if(!receipts.empty()){
+        if(receipts[0]["request"]!=packet)throw std::invalid_argument("operation_id_reused");
+        tx.commit();return receipts[0]["response"];
+    }
+    const auto id=packet["sync_id"].get<std::string>();auto current=sync_read(c,id);
+    if(current["revision"]!=packet["expected_revision"]){tx.commit();return {{"applied",false},{"item",current}};}
+    if(current["data"]!=packet["data"]){
+        Statement mapping(c,"SELECT COALESCE(JSON_QUOTE(event_id),'null') FROM calendar_sync_items WHERE sync_id=?",{id});mapping.execute();auto rows=mapping.rows();
+        std::optional<std::string> event_id;
+        if(!rows.empty()&&!rows[0].is_null())event_id=rows[0].get<std::string>();
+        auto existing=event_id?read_calendar(c,*event_id,true):std::nullopt;
+        if(existing&&(*existing)["calendar"]!="shared")throw DatabaseError("Invalid shared mapping");
+        auto data=packet["data"];
+        if(data.is_null()){
+            if(existing){
+                Statement del(c,"DELETE FROM calendar_events WHERE id=?",{*event_id});del.execute();
+                append_event(c,"calendar.deleted","/events/"+*event_id,nullptr,*existing);
+            }
+            event_id=std::nullopt;
+        }else{
+            if(!event_id)event_id=sync_uuid(c);
+            Parameters values{data["name"].get<std::string>(),data["description"].get<std::string>(),sql_datetime(data["occurs_at"]),nullable_string(data["place"]),data["recurrence"].is_null()?std::nullopt:std::optional<std::string>(data["recurrence"].dump()),data["reminder_minutes"].is_null()?std::nullopt:std::optional<std::string>(data["reminder_minutes"].dump()),*event_id};
+            if(existing){
+                // Reminder history belongs to this instance, never to the peer.
+                if(data["occurs_at"]!=(*existing)["occurs_at"]||data["recurrence"]!=(*existing)["recurrence"]){
+                    Statement reset(c,"UPDATE calendar_events SET last_reminder_occurs_at=NULL WHERE id=?",{*event_id});reset.execute();
+                }
+                Statement update(c,"UPDATE calendar_events SET name=?,description=?,occurs_at=?,place=?,recurrence=?,reminder_minutes=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",values);update.execute();
+            }else{
+                Statement insert(c,"INSERT INTO calendar_events(name,description,occurs_at,place,recurrence,reminder_minutes,id,calendar) VALUES (?,?,?,?,?,?,?,'shared')",values);insert.execute();
+            }
+            append_event(c,existing?"calendar.updated":"calendar.created","/events/"+*event_id,nullptr,*read_calendar(c,*event_id));
+        }
+        current=sync_write(c,id,event_id,data);
+    }
+    json result={{"applied",true},{"item",current}};
+    Statement saved(c,"INSERT INTO calendar_sync_receipts(coordinator_id,operation_id,request,response) VALUES (?,?,?,?)",{packet["coordinator_id"].get<std::string>(),packet["operation_id"].get<std::string>(),packet.dump(),result.dump()});saved.execute();
+    tx.commit();return result;
+}
+
+json CalendarStore::sync_state(const std::string& connection) const {
+    Connection c(config_);Statement q(c,"SELECT state FROM calendar_sync_connections WHERE connection_id=?",{connection});q.execute();auto rows=q.rows();
+    return rows.empty()?json{{"enabled",false},{"local_cursor",0},{"remote_cursor",0},{"pending",nullptr},{"status","disabled"}}:rows[0];
+}
+void CalendarStore::sync_save(const std::string& connection,const json& state) const {
+    Connection c(config_);Transaction tx(c);sync_lock(c);
+    if(state.value("enabled",false)){
+        Statement q(c,"SELECT JSON_QUOTE(connection_id) FROM calendar_sync_connections WHERE enabled=1 AND connection_id<>?",{connection});q.execute();
+        if(!q.rows().empty())throw std::invalid_argument("another_calendar_sync_enabled");
+    }
+    Statement save(c,"INSERT INTO calendar_sync_connections(connection_id,enabled,state) VALUES (?,?,?) ON DUPLICATE KEY UPDATE enabled=VALUES(enabled),state=VALUES(state)",{connection,state.value("enabled",false)?"1":"0",state.dump()});save.execute();tx.commit();
+}
+
+json CalendarStore::sync_baseline(const std::string& connection,const std::string& id) const {
+    Connection c(config_);Statement q(c,"SELECT data FROM calendar_sync_baselines WHERE connection_id=? AND sync_id=?",{connection,id});q.execute();auto rows=q.rows();
+    return rows.empty()?json{{"data",nullptr},{"local",nullptr},{"remote",nullptr}}:rows[0];
+}
+json CalendarStore::sync_conflicts(const std::string& connection,uint64_t after) const {
+    Connection c(config_);Statement q(c,"SELECT JSON_OBJECT('sequence',sequence,'conflict',JSON_EXTRACT(data,'$')) FROM calendar_sync_conflicts WHERE connection_id=? AND sequence>? ORDER BY sequence LIMIT 50",{connection,std::to_string(after)});q.execute();return q.rows();
+}
+void CalendarStore::sync_finish(const std::string& connection,const std::string& id,const json& baseline,const json& state,const json& conflict) const {
+    Connection c(config_);Transaction tx(c);sync_lock(c);
+    Statement save(c,"INSERT INTO calendar_sync_baselines(connection_id,sync_id,data) VALUES (?,?,?) ON DUPLICATE KEY UPDATE data=VALUES(data)",{connection,id,baseline.dump()});save.execute();
+    if(!conflict.is_null()){
+        Statement insert(c,"INSERT IGNORE INTO calendar_sync_conflicts(connection_id,operation_id,data) VALUES (?,?,?)",{connection,conflict["operation_id"].get<std::string>(),conflict.dump()});insert.execute();
+    }
+    Statement update(c,"UPDATE calendar_sync_connections SET state=? WHERE connection_id=?",{state.dump(),connection});update.execute();tx.commit();
 }
 void CalendarStore::tick() const {
     Connection connection(config_);
