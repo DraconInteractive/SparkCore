@@ -25,6 +25,11 @@ if [ "$db_user" = root ]; then echo 'Run this script as the SPARK service user, 
     printf "GRANT SELECT, UPDATE ON spark.notification_dispatch_lock TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, UPDATE ON spark.pulse TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, INSERT, DELETE ON spark.pulse_subscriptions TO '%s'@'localhost';\n" "$db_user"
+    printf "GRANT SELECT, UPDATE ON spark.calendar_sync_identity TO '%s'@'localhost';\n" "$db_user"
+    printf "GRANT SELECT, INSERT ON spark.calendar_sync_receipts TO '%s'@'localhost';\n" "$db_user"
+    for table in calendar_sync_items calendar_sync_connections calendar_sync_baselines calendar_sync_conflicts; do
+        printf "GRANT SELECT, INSERT, UPDATE ON spark.%s TO '%s'@'localhost';\n" "$table" "$db_user"
+    done
     printf "GRANT SELECT, INSERT, UPDATE, DELETE ON spark.calendar_events TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, INSERT, UPDATE, DELETE ON spark.daily_tasks TO '%s'@'localhost';\n" "$db_user"
     printf "GRANT SELECT, UPDATE ON spark.daily_task_day TO '%s'@'localhost';\n" "$db_user"

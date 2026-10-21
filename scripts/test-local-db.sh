@@ -35,6 +35,7 @@ unset SPARK_TEST_AUDIT_FAILURE
     cat sql/001_devices.sql sql/002_timers.sql sql/003_notifications.sql sql/004_pulse.sql sql/005_pulse_subscriptions.sql sql/006_calendar.sql sql/007_daily_tasks.sql sql/008_calendar_recurrence.sql sql/009_files.sql sql/010_file_directories.sql sql/011_projects.sql sql/012_project_hierarchy.sql sql/013_project_boards.sql sql/014_file_revisions.sql sql/015_commands.sql sql/016_storage_drives.sql sql/017_runtime_drives.sql sql/018_drive_directories.sql sql/019_command_administrators.sql sql/020_event_calendars.sql sql/021_calendar_sync.sql
 } | mariadb --no-defaults --socket="$test_dir/mysql.sock" --user=root
 python3 ./scripts/test-calendar-migration.py
+python3 ./scripts/test-db-provisioning.py
 ctest --test-dir build --output-on-failure --verbose || {
     mariadb --no-defaults --socket="$test_dir/mysql.sock" --user=root spark_test_local -e "SET time_zone='+00:00'; SELECT CURRENT_TIMESTAMP(6),pulse.* FROM pulse; SELECT event_id,type,resource FROM events ORDER BY event_id DESC LIMIT 10;"
     exit 1
