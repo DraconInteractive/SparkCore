@@ -107,3 +107,10 @@ Peer protocol endpoints:
 Read endpoints require `calendar.sync.read`; apply requires
 `calendar.sync.write`. These grants expose only the shared calendar. They do not
 grant access to local calendar events through ordinary event endpoints.
+
+
+Connection validation failures include an `error` code plus `field` and `message`.
+The explorer labels and focuses the rejected field without displaying its value.
+For token edits, paste only the raw `spark1_...` token, not a Bearer header or
+the credential-issuance JSON. Leave the token input empty to retain the saved
+token. Failed validation leaves the saved connection unchanged.

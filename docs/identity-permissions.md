@@ -203,3 +203,28 @@ through the shared provider. No database migration is required. The running OS
 user must be able to write the private credential file and its parent directory.
 
 `admin.connections` manages saved remote SPARK credentials and authorizes using them for backup sends. Backup catalog, download, copy/move and deletion require `admin.backup`. `/auth/verify` reports only the authenticated device token’s own permissions and requires no additional grant.
+
+### Issue an administrator token with all current permissions
+
+From the project checkout, run:
+
+```bash
+sudo ./scripts/issue-admin-token.sh
+```
+
+The helper uses the invoking user's `~/.config/spark/credentials.json` and username.
+Under sudo it drops back to that user before accessing the file, preserving its
+private ownership. It also works without sudo. The credential store must already
+exist, and `build/spark_credentials` must be built from the current source.
+
+For a different credential store or administrator subject:
+
+```bash
+sudo ./scripts/issue-admin-token.sh /path/to/credentials.json administrator-name
+```
+
+Use the same credentials file as the running server. Output is JSON containing
+the new credential ID and raw token. Existing tokens remain valid. Log out of
+the browser and log back in with the new token to use its new permissions.
+The helper obtains every permission from the compiled credential tool, including
+new grants such as `calendar.sync.read` and `calendar.sync.write`.

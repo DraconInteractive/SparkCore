@@ -181,7 +181,7 @@ async def exercise_firefox(profile,admin,root):
             await evaluate("document.getElementById('new').click();true")
             await wait("document.getElementById('dialog').open")
             await evaluate("const f=document.getElementById('form');f.elements.name.value='Invalid HTTP';f.elements.url.value='http://localhost';f.elements.device_id.value='spark-a';f.elements.token.value='spark1_'+'a'.repeat(64);f.requestSubmit();true")
-            await wait("document.getElementById('error').textContent==='https_origin_required'")
+            await wait("document.getElementById('error').textContent.includes('HTTPS address: Enter an HTTPS origin') && document.activeElement.name==='url'")
             await evaluate("document.getElementById('cancel').click();true")
             assert await evaluate("document.querySelector('input[type=password]').value===''")
             await navigate('/backups/explorer')

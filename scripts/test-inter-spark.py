@@ -55,6 +55,11 @@ try:
         local('/connections','POST',{**connection,'url':'http://localhost'},400)
         local('/connections','POST',{**connection,'url':proxy.origin.replace('localhost','127.0.0.1')},502)
         created=local('/connections','POST',connection,201);cid=created['id'];assert 'token' not in created and created['permissions']==['files.read','files.write']
+        for field,value in [('token',''),('token','x'*101),('token','spark1_'+'a'*64+'\n'),('token',None),('token','Bearer '+b['device']['token']),('name',''),('url','https://example.com/path'),('device_id','bad id'),('drive','a'),('directory','relative')]:
+            error=local('/connections/'+cid,'PATCH',{field:value},400)
+            assert error['field']==field and error['message'],error
+            assert b['device']['token'] not in json.dumps(error)
+        assert local('/connections')['connections']==[created],'failed edits must preserve connection'
         assert b['device']['token'] not in json.dumps(local('/connections'))
         assert (a['folder']/'files/.spark-control/connections.json').stat().st_mode&0o777==0o600
         # Metadata estimates account for sparse data and exclude old backups/control files.
