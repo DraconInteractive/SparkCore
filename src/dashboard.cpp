@@ -1,3 +1,4 @@
+#include "logging.hpp"
 #include "dashboard.hpp"
 #include "files.hpp"
 #include <filesystem>
@@ -25,7 +26,7 @@ constexpr const char* html=R"HTML(<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SPARK</title>
 <style>body{margin:0;background:#101820;color:#e5edf3;font:16px system-ui}main{max-width:950px;margin:auto;padding:48px 24px}h1{font-size:48px;margin-bottom:8px}p{color:#adc1ce}nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:32px 0}nav a,section{background:#1a2935;border:1px solid #324957;border-radius:12px;padding:24px}a{color:#78dfcc;text-decoration:none}nav a strong{display:block;font-size:22px;margin-bottom:8px}button,input,select{font:inherit;padding:10px;border-radius:6px;border:1px solid #56717f}button{background:#78dfcc;color:#102029;cursor:pointer}button:disabled{opacity:.5}label{display:block;margin:16px 0 6px}input,select{box-sizing:border-box;width:100%;background:#101820;color:white}dialog{max-width:520px;width:80%;background:#1a2935;color:white;border:1px solid #56717f;border-radius:12px}dialog::backdrop{background:#0009}.actions{display:flex;gap:12px;margin-top:20px}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto}#status{color:#78dfcc}</style>
 <main><h1>SPARK</h1><p>Your devices, projects and shared files.</p><div id="status" role="status">Connecting…</div>
-<nav><a href="/backups/explorer" data-spark-permission="admin.backup"><strong>Backups</strong>Manage and transfer backups</a><a href="/connections/explorer" data-spark-permission="admin.connections"><strong>Connections</strong>Manage other SPARK instances</a><a href="/projects/explorer"><strong>Projects</strong>Projects, boards and tasks</a><a href="/files/explorer"><strong>Files</strong>Browse, edit and share files</a><a href="/commands/explorer"><strong>Commands</strong>Run device actions and inspect results</a><a href="/api/docs"><strong>API reference</strong>Explore endpoints and packets</a><a id="credentials-link" href="/admin/credentials/explorer" data-spark-permission="admin.credentials"><strong>Device access</strong>Provision and revoke device tokens</a></nav>
+<nav><a href="/configs/explorer" data-spark-permission="configs.read"><strong>Configs</strong>Device configuration and JSON editor</a><a href="/backups/explorer" data-spark-permission="admin.backup"><strong>Backups</strong>Manage and transfer backups</a><a href="/connections/explorer" data-spark-permission="admin.connections"><strong>Connections</strong>Manage other SPARK instances</a><a href="/projects/explorer"><strong>Projects</strong>Projects, boards and tasks</a><a href="/files/explorer"><strong>Files</strong>Browse, edit and share files</a><a href="/commands/explorer"><strong>Commands</strong>Run device actions and inspect results</a><a href="/api/docs"><strong>API reference</strong>Explore endpoints and packets</a><a id="credentials-link" href="/admin/credentials/explorer" data-spark-permission="admin.credentials"><strong>Device access</strong>Provision and revoke device tokens</a></nav>
 <section><h2>Server controls</h2><p>Restart briefly disconnects devices. Backup pauses ordinary REST and TCP while files and database are compressed and verified. The authenticated backup progress page stays available.</p><div class="actions"><button id="restart" data-spark-permission="admin.restart">Restart server</button><button id="backup" data-spark-permission="admin.backup">Back up storage</button></div><p><a href="/backups/progress" data-spark-permission="admin.backup">View backup progress and log</a></p><pre id="result" aria-live="polite"></pre></section></main>
 <script src="/auth/client.js"></script>
 <script>
@@ -72,7 +73,7 @@ void Maintenance::execute() {
             auto next=std::chrono::steady_clock::now();
             while(!eof){pollfd descriptor{pipes[0],POLLIN,0};poll(&descriptor,1,500);ssize_t count;
                 while((count=read(pipes[0],buffer,sizeof(buffer)))>0){
-                    std::cout.write(buffer,count);std::cout.flush();if(log_fd>=0){size_t offset=0;while(offset<size_t(count)){auto n=write(log_fd,buffer+offset,size_t(count)-offset);if(n<0&&errno==EINTR)continue;if(n<=0)break;offset+=n;}}
+                    if(log_fd>=0){size_t offset=0;while(offset<size_t(count)){auto n=write(log_fd,buffer+offset,size_t(count)-offset);if(n<0&&errno==EINTR)continue;if(n<=0)break;offset+=n;}}
                     output.append(buffer,count);if(output.size()>32768)output.erase(0,output.size()-32768);pending.append(buffer,count);size_t newline;
                     while((newline=pending.find('\n'))!=std::string::npos){auto line=pending.substr(0,newline);pending.erase(0,newline+1);
                         if(line.rfind("SPARK_STAGE ",0)==0){auto stage=line.substr(12);auto space=stage.find(' ');progress({{"stage",stage.substr(0,space)},{"stage_detail",space==std::string::npos?"":stage.substr(space+1)},{"last_activity_at",time(nullptr)}});}
@@ -82,14 +83,14 @@ void Maintenance::execute() {
                     }
                 }
                 if(count==0)eof=true;else if(count<0&&errno!=EAGAIN&&errno!=EINTR)eof=true;
-                if(std::chrono::steady_clock::now()>=next||eof){try{observe();}catch(const std::exception& e){std::cerr<<"Backup activity observation failed: "<<e.what()<<std::endl;}next=std::chrono::steady_clock::now()+std::chrono::seconds(1);}
+                if(std::chrono::steady_clock::now()>=next||eof){try{observe();}catch(const std::exception& e){log_exception("warning","backup","Backup activity observation failed",e);}next=std::chrono::steady_clock::now()+std::chrono::seconds(1);}
             }
             if(log_fd>=0){fsync(log_fd);close(log_fd);}
             close(pipes[0]);int status=0;
             if(rc==0){while(waitpid(pid,&status,0)<0){if(errno!=EINTR){rc=-1;break;}}}
             const bool ok=rc==0 && WIFEXITED(status) && WEXITSTATUS(status)==0;
             progress({{"state",ok?"succeeded":"failed"},{"stage",ok?"complete":"failed"},{"finished_at",time(nullptr)},{"process_alive",false},{"message",ok?"Backup completed and verified.":"Backup failed. Review the log; incomplete files may remain."},{"log_tail",output}});
-            if(ok)try{record_success();}catch(const std::exception& e){std::cerr<<"Backup completed but timing history could not be saved: "<<e.what()<<std::endl;}
+            if(ok)try{record_success();}catch(const std::exception& e){log_exception("warning","backup","Backup completed but timing history could not be saved",e);}
             outcome={{"state",ok?"succeeded":"failed"},{"message",std::string(ok?"Backup completed.\n":"Backup failed.\n")+output}};
         }
     }

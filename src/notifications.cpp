@@ -1,3 +1,4 @@
+#include "logging.hpp"
 #include "notifications.hpp"
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -107,7 +108,7 @@ struct NotificationServer::Impl {
         close(socket_fd);
     }
     void publish() {
-        bool failed = false;
+        RetryLog retry("notification.poller");
         while (!stopping) {
             try {
                 store->sequence_events();
@@ -142,14 +143,12 @@ struct NotificationServer::Impl {
                     std::lock_guard<std::mutex> lock(mutex);
                     results.push_back(std::move(result));
                 }
-                if (failed) std::cerr << "Notification event polling recovered\n";
-                failed = false;
+                retry.success();
             } catch (const std::exception& exception) {
-                if (!failed) std::cerr << "Notification event polling will retry: " << exception.what() << '\n';
+                retry.failure(exception);
                 // Pending work may have failed part-way through. Drop all sessions;
                 // their durable client cursors make retry safe after recovery.
                 { std::lock_guard<std::mutex> lock(mutex); reset = true; requests.clear(); results.clear(); }
-                failed = true;
             }
             std::unique_lock<std::mutex> lock(mutex);
             wake.wait_for(lock, std::chrono::milliseconds(250), [this] { return stopping.load(); });
@@ -188,7 +187,7 @@ struct NotificationServer::Impl {
     }
     json resources(const Client& client) const {
         json result=json::array();
-        for(const std::string& path:std::vector<std::string>{"/timers", "/pulse", "/events", "/daily-tasks", "/projects", "/files", "/files/drives", "/files/directories", "/devices/"+client.device_id, "/devices/"+client.device_id+"/actions", "/commands?source_device="+client.device_id, "/commands?executing_device="+client.device_id}) {
+        for(const std::string& path:std::vector<std::string>{"/timers", "/pulse", "/events", "/daily-tasks", "/configs", "/projects", "/files", "/files/drives", "/files/directories", "/devices/"+client.device_id, "/devices/"+client.device_id+"/actions", "/commands?source_device="+client.device_id, "/commands?executing_device="+client.device_id}) {
             if(client.identity->kind=="open"){result.push_back(path);continue;}
             auto base=path.substr(0,path.find('?'));
             for(const auto& rule:route_policies())if(rule.method=="GET"&&std::regex_match(base,rule.pattern)){
@@ -312,10 +311,10 @@ json notification_discovery(int port) {
         {"checkpoint", {{"type","checkpoint"},{"sequence",55}}},
         {"hello", {{"type", "hello"}, {"device_id", "watch-1"}}},
         {"welcome", {{"type", "welcome"}, {"protocol_version", 1}, {"device_id", "watch-1"}, {"resync_required", true}, {"sequence",42},
-                     {"resources", json::array({"/timers", "/pulse", "/events", "/daily-tasks", "/projects", "/files", "/files/drives", "/files/directories", "/devices/watch-1"})}, {"heartbeat_interval_seconds", 30}, {"idle_timeout_seconds", 90}}},
+                     {"resources", json::array({"/timers", "/pulse", "/events", "/daily-tasks", "/configs", "/projects", "/files", "/files/drives", "/files/directories", "/devices/watch-1"})}, {"heartbeat_interval_seconds", 30}, {"idle_timeout_seconds", 90}}},
         {"commands", "command.available is filtered to devices currently advertising the action and matching optional target_device. command.updated goes to source, explicit target, and executor. On reconnect and after advertising, POST /devices/{id}/commands/claim until command:null (subject to local execution capacity); also poll periodically. Refresh requester/executor command history through paginated GET /commands. Claims are required before execution; notifications never authorize work."},
         {"notification", {{"sequence", 42}, {"event_id", 123}, {"type", "timer.created"}, {"resource", "/timers/<id>"}, {"source_device", "watch-1"}}},
-        {"event_types", json::array({"timer.created", "timer.expired", "timer.confirmed", "timer.stopped", "pulse.updated", "pulse.triggered", "calendar.created", "calendar.updated", "calendar.deleted", "calendar.reminder", "daily_tasks.updated", "daily_tasks.reset", "board.created", "board.updated", "board.deleted", "file.created", "file.updated", "file.deleted", "files.directories_updated", "drives.updated", "project.created", "project.updated", "project.deleted", "device.created", "device.updated", "device.deleted", "device.subscription_updated", "device.actions_updated", "command.available", "command.updated"})},
+        {"event_types", json::array({"timer.created", "timer.expired", "timer.confirmed", "timer.stopped", "pulse.updated", "pulse.triggered", "calendar.created", "calendar.updated", "calendar.deleted", "calendar.reminder", "daily_tasks.updated", "daily_tasks.reset", "config.created", "config.updated", "config.deleted", "board.created", "board.updated", "board.deleted", "file.created", "file.updated", "file.deleted", "files.directories_updated", "drives.updated", "project.created", "project.updated", "project.deleted", "device.created", "device.updated", "device.deleted", "device.subscription_updated", "device.actions_updated", "command.available", "command.updated"})},
         {"change_notifications", {
             {"file.created", "Completed durable upload; resource=/files/{id}. Fetch metadata and refresh lists."},
             {"file.updated", "Text save or move; resource=/files/{id}. Refresh metadata/content and cached directory listings."},

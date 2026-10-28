@@ -1,3 +1,4 @@
+#include "configs.hpp"
 #include "api.hpp"
 #include "credential_management.hpp"
 #include "browser_auth.hpp"
@@ -26,7 +27,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.42.0";
+constexpr auto api_version = "1.43.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -88,6 +89,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     for (const auto& endpoint : pulse_endpoints()) discovery["endpoints"].push_back(endpoint);
     for(const auto& endpoint:calendar_sync_endpoints())discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : calendar_endpoints()) discovery["endpoints"].push_back(endpoint);
+    for(const auto& endpoint:config_endpoints())discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : daily_task_endpoints()) discovery["endpoints"].push_back(endpoint);
     discovery["endpoints"].push_back({
         {"method", "GET"}, {"path", "/api/docs"}, {"description", "Human-readable API reference with a searchable endpoint sidebar and request/response details. Requires JavaScript; loads the current /api contract."},
@@ -145,7 +147,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     if(auth)server.set_default_headers({{"Cache-Control","no-store"}});
     server.set_pre_routing_handler([endpoints,auth](const auto& request, auto& response) {
         if(auth&&!browser_public_route(request)&&!auth->request(request,response)){
-            if(response.status==401&&(request.method=="GET"||request.method=="HEAD")&&!request.has_header("Authorization")&&request.get_header_value("Accept").find("text/html")!=std::string::npos && (request.path=="/"||request.path=="/api/docs"||request.path=="/files/explorer"||request.path=="/projects/explorer"||request.path=="/commands/explorer"||request.path=="/admin/credentials/explorer"||request.path=="/backups/new"||request.path=="/backups/progress"||request.path=="/backups/explorer"||request.path=="/connections/explorer")){
+            if(response.status==401&&(request.method=="GET"||request.method=="HEAD")&&!request.has_header("Authorization")&&request.get_header_value("Accept").find("text/html")!=std::string::npos && (request.path=="/"||request.path=="/api/docs"||request.path=="/files/explorer"||request.path=="/projects/explorer"||request.path=="/commands/explorer"||request.path=="/configs/explorer"||request.path=="/admin/credentials/explorer"||request.path=="/backups/new"||request.path=="/backups/progress"||request.path=="/backups/explorer"||request.path=="/connections/explorer")){
                 response.body.clear();response.set_redirect("/login?next="+request.path,303);
             }
             return httplib::Server::HandlerResponse::Handled;
@@ -157,7 +159,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
             const auto value=request.get_header_value("Content-Length");std::uint64_t length=0;
             const auto parsed=std::from_chars(value.data(),value.data()+value.size(),length);
             if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || request.get_header_value_count("Content-Length")!=1 || request.has_header("Transfer-Encoding"))return reject(400,"invalid_content_length");
-            if(!upload && length>(text_edit?2097152:request.path=="/calendar-sync/apply"?65536:16384))return reject(413,"payload_too_large");
+            if(!upload && length>(text_edit?2097152:request.path=="/calendar-sync/apply"?65536:(request.path=="/configs"||std::regex_match(request.path,std::regex(R"(/configs/[^/]+)")))?131072:16384))return reject(413,"payload_too_large");
         }
         if(request.has_header("Transfer-Encoding") && request.method!="POST" && request.method!="PATCH" && request.method!="PUT" && request.method!="DELETE")return reject(400,"unexpected_body");
         std::string timer_allow;
@@ -198,6 +200,9 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         if(std::regex_match(request.path,std::regex(R"(/connections/[0-9a-f]{32}/calendar-sync)")))timer_allow="GET, HEAD, PUT, OPTIONS";
         if(std::regex_match(request.path,std::regex(R"(/connections/[0-9a-f]{32}/calendar-sync/run)")))timer_allow="POST, OPTIONS";
         if(std::regex_match(request.path,std::regex(R"(/connections/[0-9a-f]{32}/calendar-sync/conflicts)")))timer_allow="GET, HEAD, OPTIONS";
+        if(request.path=="/configs")timer_allow="GET, HEAD, POST, OPTIONS";
+        else if(request.path=="/configs/explorer"||std::regex_match(request.path,std::regex(R"(/configs/[^/]+/content)")))timer_allow="GET, HEAD, OPTIONS";
+        else if(std::regex_match(request.path,std::regex(R"(/configs/[^/]+)")))timer_allow="GET, HEAD, PATCH, DELETE, OPTIONS";
         if (request.path == "/events") timer_allow = "GET, HEAD, POST, OPTIONS";
         else if (std::regex_match(request.path,std::regex(R"(/events/[^/]+/move)"))) timer_allow="POST, OPTIONS";
         else if (request.path == "/events/occurrences") timer_allow = "GET, HEAD, OPTIONS";
@@ -272,6 +277,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     configure_timers(server, std::move(timers), auth);
     configure_pulse(server, std::move(pulse), auth);
     configure_calendar(server, std::move(calendar), auth);
+    configure_configs(server,std::make_shared<ConfigStore>(DatabaseConfig::from_environment()),auth);
     configure_daily_tasks(server, std::move(tasks), auth);
     configure_boards(server, std::make_shared<BoardStore>(DatabaseConfig::from_environment()), files, auth);
     configure_projects(server, std::make_shared<ProjectStore>(DatabaseConfig::from_environment()), files, auth);

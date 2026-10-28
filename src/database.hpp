@@ -16,7 +16,11 @@ struct DatabaseConfig {
 };
 class DatabaseError : public std::runtime_error {
 public:
-    using std::runtime_error::runtime_error;
+    unsigned code=0;
+    std::string sqlstate,operation;
+    explicit DatabaseError(const std::string& message,unsigned number=0,
+                           std::string state={},std::string action={})
+        :std::runtime_error(message),code(number),sqlstate(std::move(state)),operation(std::move(action)){}
 };
 class DeviceStore {
 public:

@@ -1,3 +1,4 @@
+#include "configs.hpp"
 #include <queue>
 #include <unordered_map>
 #include <functional>
@@ -30,6 +31,12 @@ std::string env(const char* name, const std::string& fallback = {}) {
     const char* value = std::getenv(name);
     return value ? value : fallback;
 }
+DatabaseError connection_error(MYSQL* handle,const char* message,const char* operation){
+    return DatabaseError(message,handle?mysql_errno(handle):0,handle?mysql_sqlstate(handle):"",operation);
+}
+DatabaseError statement_error(MYSQL_STMT* handle,const char* message,const char* operation){
+    return DatabaseError(message,handle?mysql_stmt_errno(handle):0,handle?mysql_stmt_sqlstate(handle):"",operation);
+}
 struct Library {
     Library() { if (mysql_library_init(0, nullptr, nullptr)) throw DatabaseError("Cannot initialize MariaDB connector"); }
     ~Library() { mysql_library_end(); }
@@ -46,13 +53,13 @@ struct Connection {
         mysql_options(handle.get(), MYSQL_OPT_WRITE_TIMEOUT, &timeout);
         if (!mysql_real_connect(handle.get(), config.host.c_str(), config.user.c_str(), config.password.c_str(),
             config.database.c_str(), config.port, config.socket.empty() ? nullptr : config.socket.c_str(), 0))
-            throw DatabaseError("Cannot connect to MariaDB (check service, credentials, and database)");
-        if (mysql_set_character_set(handle.get(), "utf8mb4")) throw DatabaseError("Cannot set MariaDB character set");
+            throw connection_error(handle.get(),"Cannot connect to MariaDB (check service, credentials, and database)","connect");
+        if (mysql_set_character_set(handle.get(), "utf8mb4")) throw connection_error(handle.get(),"Cannot set MariaDB character set","charset");
         query("SET time_zone = '+00:00'");
         query("SET SESSION innodb_lock_wait_timeout = 5");
     }
     void query(const char* sql) {
-        if (mysql_query(handle.get(), sql)) throw DatabaseError("MariaDB statement failed");
+        if (mysql_query(handle.get(), sql)) throw connection_error(handle.get(),"MariaDB statement failed","query");
     }
 };
 struct Transaction {
@@ -61,7 +68,7 @@ struct Transaction {
     explicit Transaction(Connection& c) : connection(c) { connection.query("START TRANSACTION"); }
     ~Transaction() { if (!committed) mysql_rollback(connection.handle.get()); }
     void commit() {
-        if (mysql_commit(connection.handle.get())) throw DatabaseError("MariaDB commit failed");
+        if (mysql_commit(connection.handle.get())) throw connection_error(connection.handle.get(),"MariaDB commit failed","commit");
         committed = true;
     }
 };
@@ -72,7 +79,7 @@ struct Statement {
     Statement(Connection& connection, const std::string& sql, Parameters parameters = {}) : values(std::move(parameters)) {
         handle.reset(mysql_stmt_init(connection.handle.get()));
         if (!handle || mysql_stmt_prepare(handle.get(), sql.c_str(), sql.size()))
-            throw DatabaseError("Cannot prepare MariaDB statement (check schema and permissions)");
+            throw statement_error(handle.get(),"Cannot prepare MariaDB statement (check schema and permissions)","prepare");
         binds.resize(values.size());
         for (std::size_t i = 0; i < values.size(); ++i) {
             binds[i] = {};
@@ -83,12 +90,12 @@ struct Statement {
             }
         }
         if (!binds.empty() && mysql_stmt_bind_param(handle.get(), binds.data()))
-            throw DatabaseError("Cannot bind MariaDB parameters");
+            throw statement_error(handle.get(),"Cannot bind MariaDB parameters","bind");
     }
     bool execute(bool allow_duplicate = false) {
         if (mysql_stmt_execute(handle.get())) {
             if (allow_duplicate && mysql_stmt_errno(handle.get()) == 1062) return false;
-            throw DatabaseError("MariaDB operation failed");
+            throw statement_error(handle.get(),"MariaDB operation failed","execute");
         }
         return true;
     }
@@ -102,12 +109,12 @@ struct Statement {
         result.buffer_length = buffer.size();
         result.length = &length;
         if (mysql_stmt_bind_result(handle.get(), &result) || mysql_stmt_store_result(handle.get()))
-            throw DatabaseError("Cannot read MariaDB JSON result");
+            throw statement_error(handle.get(),"Cannot read MariaDB JSON result","read");
         json records = json::array();
         for (;;) {
             const int status = mysql_stmt_fetch(handle.get());
             if (status == MYSQL_NO_DATA) break;
-            if (status != 0 && status != MYSQL_DATA_TRUNCATED) throw DatabaseError("Invalid MariaDB JSON result");
+            if (status != 0 && status != MYSQL_DATA_TRUNCATED) throw statement_error(handle.get(),"Invalid MariaDB JSON result","fetch");
             if (length > buffer.size()) {
                 if (length > 1048576) throw DatabaseError("MariaDB JSON result exceeds limit");
                 std::vector<char> expanded(length);
@@ -115,7 +122,7 @@ struct Statement {
                 column.buffer_type = MYSQL_TYPE_STRING;
                 column.buffer = expanded.data();
                 column.buffer_length = expanded.size();
-                if (mysql_stmt_fetch_column(handle.get(), &column, 0, 0)) throw DatabaseError("Cannot read full MariaDB JSON result");
+                if (mysql_stmt_fetch_column(handle.get(), &column, 0, 0)) throw statement_error(handle.get(),"Cannot read full MariaDB JSON result","fetch");
                 records.push_back(json::parse(expanded.begin(), expanded.end()));
             } else records.push_back(json::parse(buffer.data(), buffer.data() + length));
         }
@@ -134,10 +141,10 @@ struct Statement {
             results[i].is_null = &nulls[i];
         }
         if (mysql_stmt_bind_result(handle.get(), results.data()) || mysql_stmt_store_result(handle.get()))
-            throw DatabaseError("Cannot read MariaDB device");
+            throw statement_error(handle.get(),"Cannot read MariaDB device","read");
         const int status = mysql_stmt_fetch(handle.get());
         if (status == MYSQL_NO_DATA) return std::nullopt;
-        if (status != 0) throw DatabaseError("Invalid MariaDB device result");
+        if (status != 0) throw statement_error(handle.get(),"Invalid MariaDB device result","fetch");
         json record = {{"id", id}, {"local_ip", std::string(buffers[0].data(), lengths[0])}, {"external_ip", nullptr}};
         if (!nulls[1]) record["external_ip"] = std::string(buffers[1].data(), lengths[1]);
         return record;
@@ -390,6 +397,7 @@ json NotificationStore::after(unsigned long long sequence, unsigned long long th
         "SELECT JSON_MERGE_PATCH(JSON_OBJECT('sequence',n.sequence,'event_id',e.event_id,'type',e.type,'resource',e.resource,'source_device',e.source_device), "
         "CASE WHEN e.type='calendar.reminder' THEN JSON_MERGE_PATCH(JSON_OBJECT('calendar','local'),e.payload) "
         "WHEN e.type IN ('calendar.created','calendar.updated','calendar.deleted') THEN JSON_OBJECT('calendar',COALESCE(JSON_UNQUOTE(JSON_EXTRACT(e.payload,'$.calendar')),'local'),'previous_calendar',JSON_EXTRACT(e.payload,'$.previous_calendar')) "
+        "WHEN e.type IN ('config.created','config.updated','config.deleted') THEN e.payload "
         "WHEN e.type IN ('command.available','command.updated','files.directories_updated') THEN e.payload "
         "WHEN e.type='device.subscription_updated' THEN JSON_OBJECT('subscribed',JSON_EXTRACT(e.payload,'$.subscribed')) ELSE JSON_OBJECT() END) "
         "FROM notification_log n JOIN events e ON e.event_id=n.event_id WHERE n.sequence>? AND n.sequence<=? ORDER BY n.sequence LIMIT 256", {std::to_string(sequence),std::to_string(through)});
@@ -1096,7 +1104,7 @@ void board_conflict(Connection& c,const std::string& table,const std::string& ow
 }
 void BoardStore::verify() const {
     Connection c(config_);
-    for(const auto& pair:std::vector<std::pair<std::string,std::string>>{{"project_boards",board_projection},{"project_columns",column_projection},{"project_tasks",task_projection}}){Statement q(c,"SELECT "+pair.second+" FROM "+pair.first+" LIMIT 0");try{q.execute();}catch(const DatabaseError&){throw DatabaseError("Cannot verify "+pair.first+": "+mysql_stmt_error(q.handle.get()));}}
+    for(const auto& pair:std::vector<std::pair<std::string,std::string>>{{"project_boards",board_projection},{"project_columns",column_projection},{"project_tasks",task_projection}}){Statement q(c,"SELECT "+pair.second+" FROM "+pair.first+" LIMIT 0");try{q.execute();}catch(const DatabaseError&){throw statement_error(q.handle.get(),"Cannot verify board schema","verify");}}
 }
 json BoardStore::execute(const std::string& project,const std::string& board_id,const std::string& kind,const std::string& item_id,const std::string& method,const json& packet) const {
     Connection c(config_);Transaction tx(c);
@@ -1347,5 +1355,56 @@ json FileStore::drives() const {
 void FileStore::detach_drive(const std::string& id) const {
     Connection c(config_);Transaction tx(c);Statement q(c,"UPDATE storage_drives SET attached=FALSE WHERE id=? AND persistent=FALSE",{id});q.execute();
     if(q.changed())append_event(c,"drives.updated","/files/drives",nullptr,json::object());tx.commit();
+}
+}
+
+namespace spark {
+namespace {
+const std::string config_metadata="JSON_OBJECT('id',id,'name',name,'description',description,'tags',JSON_EXTRACT(tags,'$'),'revision',revision,'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+std::optional<json> read_config(Connection& c,const std::string& id,bool lock=false){
+    Statement q(c,"SELECT JSON_SET("+config_metadata+",'$.data',JSON_EXTRACT(data,'$')) FROM configs WHERE id=?"+(lock?" FOR UPDATE":""),{id});
+    q.execute();auto rows=q.rows();return rows.empty()?std::nullopt:std::optional<json>(rows[0]);
+}
+void config_event(Connection& c,const char* action,const json& record,const json& source=nullptr){
+    append_event(c,std::string("config.")+action,"/configs/"+record["id"].get<std::string>(),source,{{"config_id",record["id"]},{"revision",record["revision"]}});
+}
+}
+void ConfigStore::verify() const {
+    Connection c(config_);Statement q(c,"SELECT "+config_metadata+" FROM configs LIMIT 0");q.execute();q.rows();
+}
+json ConfigStore::create(const json& p) const {
+    Connection c(config_);Transaction tx(c);const auto id=sync_uuid(c);
+    Statement insert(c,"INSERT INTO configs(id,name,description,tags,data) VALUES (?,?,?,?,?)",
+        {id,p["name"].get<std::string>(),p.value("description",std::string{}),p.value("tags",json::array()).dump(),p["data"].dump()});insert.execute();
+    auto record=*read_config(c,id);config_event(c,"created",record,p.value("source_device",json(nullptr)));tx.commit();return record;
+}
+std::optional<json> ConfigStore::get(const std::string& id) const {
+    Connection c(config_);return read_config(c,id);
+}
+json ConfigStore::list(const json& filters) const {
+    Connection c(config_);std::string sql="SELECT "+config_metadata+" FROM configs WHERE 1=1";Parameters values;
+    if(filters.contains("name")){sql+=" AND BINARY name=BINARY ?";values.push_back(filters["name"].get<std::string>());}
+    for(const auto& tag:filters.value("tags",json::array())){sql+=" AND JSON_CONTAINS(tags,JSON_QUOTE(?))";values.push_back(tag.get<std::string>());}
+    int limit=filters.value("limit",50),offset=filters.value("offset",0);
+    sql+=" ORDER BY created_at,id LIMIT ? OFFSET ?";values.push_back(std::to_string(limit+1));values.push_back(std::to_string(offset));
+    Statement q(c,sql,values);q.execute();auto rows=q.rows();bool more=rows.size()>size_t(limit);if(more)rows.erase(rows.end()-1);
+    return {{"configs",rows},{"limit",limit},{"offset",offset},{"has_more",more}};
+}
+std::optional<json> ConfigStore::update(const std::string& id,const json& p) const {
+    Connection c(config_);Transaction tx(c);auto current=read_config(c,id,true);if(!current)return std::nullopt;
+    if((*current)["revision"]!=p["revision"])throw ConfigConflict((*current)["revision"]);
+    auto changed=*current;for(const auto* key:{"name","description","tags","data"})if(p.contains(key))changed[key]=p[key];
+    if(changed==*current){tx.commit();return current;}
+    if((*current)["revision"].get<uint64_t>()>=9007199254740991ULL)throw std::invalid_argument("revision_exhausted");
+    Statement update(c,"UPDATE configs SET name=?,description=?,tags=?,data=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",
+        {changed["name"].get<std::string>(),changed["description"].get<std::string>(),changed["tags"].dump(),changed["data"].dump(),id});update.execute();
+    current=read_config(c,id);config_event(c,"updated",*current,p.value("source_device",json(nullptr)));tx.commit();return current;
+}
+bool ConfigStore::remove(const std::string& id,uint64_t revision) const {
+    Connection c(config_);Transaction tx(c);auto current=read_config(c,id,true);if(!current)return false;
+    if((*current)["revision"]!=revision)throw ConfigConflict((*current)["revision"]);
+    if(revision>=9007199254740991ULL)throw std::invalid_argument("revision_exhausted");
+    Statement remove(c,"DELETE FROM configs WHERE id=?",{id});remove.execute();
+    (*current)["revision"]=revision+1;config_event(c,"deleted",*current);tx.commit();return true;
 }
 }

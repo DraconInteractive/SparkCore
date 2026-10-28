@@ -1,3 +1,4 @@
+#include "logging.hpp"
 #include "files.hpp"
 #include "folder_downloads.hpp"
 #include "file_explorer.hpp"
@@ -276,7 +277,7 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
         const auto name=request.get_param_value("name");if(!valid_name(name)){bad(400,"invalid_filename");return;}
         std::shared_lock<std::shared_mutex> gate(storage->project_gate);
         std::string id;bool publishing=false;
-        auto cleanup=[&]{if(!id.empty() && !publishing)try{storage->erase_bytes(id);storage->store->forget(id);}catch(const std::exception& e){std::cerr<<"File cleanup deferred until restart: "<<e.what()<<'\n';}};
+        auto cleanup=[&]{if(!id.empty() && !publishing)try{storage->erase_bytes(id);storage->store->forget(id);}catch(const std::exception& e){log_exception("warning","files","File cleanup deferred until restart",e);}};
         try {
             storage->initialize();
             std::optional<std::uint64_t> expected;

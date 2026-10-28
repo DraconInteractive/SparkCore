@@ -1,3 +1,4 @@
+#include "logging.hpp"
 #include "bounded_body.hpp"
 #include "pulse.hpp"
 #include <chrono>
@@ -7,17 +8,15 @@ namespace spark {
 using nlohmann::json;
 PulseScheduler::PulseScheduler(std::shared_ptr<PulseStore> store) {
     worker_ = std::thread([this, store] {
-        bool failed = false;
+        RetryLog retry("pulse.scheduler");
         std::unique_lock<std::mutex> lock(mutex_);
         while (!stopping_) {
             lock.unlock();
             try {
                 store->tick();
-                if (failed) std::cerr << "Pulse scheduler recovered\n";
-                failed = false;
+                retry.success();
             } catch (const std::exception& error) {
-                if (!failed) std::cerr << "Pulse scheduler will retry: " << error.what() << '\n';
-                failed = true;
+                retry.failure(error);
             }
             lock.lock();
             wake_.wait_for(lock, std::chrono::seconds(1), [this] { return stopping_; });

@@ -1,3 +1,4 @@
+#include "logging.hpp"
 #include "commands.hpp"
 #include "command_explorer.hpp"
 #include "bounded_body.hpp"
@@ -16,8 +17,8 @@ void lease(const json& p){if(p.contains("lease_seconds"))require(p["lease_second
 void reply(httplib::Response& r,int status,const json& body){r.status=status;r.set_content(body.dump(2)+"\n","application/json");}
 }
 CommandScheduler::CommandScheduler(std::shared_ptr<CommandStore> store):worker_([this,store]{
-    std::unique_lock<std::mutex> lock(mutex_);bool failed=false;
-    while(!stopping_){lock.unlock();try{store->expire();if(failed)std::cerr<<"Command scheduler recovered\n";failed=false;}catch(const std::exception& e){if(!failed)std::cerr<<"Command scheduler will retry: "<<e.what()<<'\n';failed=true;}lock.lock();wake_.wait_for(lock,std::chrono::seconds(1),[this]{return stopping_;});}
+    std::unique_lock<std::mutex> lock(mutex_);RetryLog retry("command.scheduler");
+    while(!stopping_){lock.unlock();try{store->expire();retry.success();}catch(const std::exception& e){retry.failure(e);}lock.lock();wake_.wait_for(lock,std::chrono::seconds(1),[this]{return stopping_;});}
 }){}
 CommandScheduler::~CommandScheduler(){{std::lock_guard<std::mutex> lock(mutex_);stopping_=true;}wake_.notify_all();worker_.join();}
 void configure_commands(httplib::Server& server,std::shared_ptr<CommandStore> store, std::shared_ptr<Authorization> auth){

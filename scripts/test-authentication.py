@@ -100,6 +100,8 @@ try:
         try:
             if proxy:proxy.start()
             wait_start(admin)
+            from config_checks import check_configs
+            check_configs(call, issue, admin, sql, Peer, boundary)
             if proxy:
                 proxy.check_transport()
                 browser_request,browser_headers=proxy.browser_session(admin)
@@ -220,8 +222,10 @@ try:
                     if packet['type']=='error':assert packet['error']=='unauthorized';break
             p=Peer('auth-reader',reader,error='unauthorized');p.close()
             # Dashboard restart preserves auth, and does not switch to open mode.
+            persisted_config=call('POST','/configs',admin,{'name':'restart-config','data':{'persisted':True}},201)
             call('POST','/admin/restart',admin,{},202,headers={'X-SPARK-Admin':'dashboard'})
             time.sleep(1.5);wait_start(admin)
+            assert call('GET','/configs/'+persisted_config['id'],admin)==persisted_config
             call('GET','/health',status=401)
             if proxy:
                 proxy.check_transport()

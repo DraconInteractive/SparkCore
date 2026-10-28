@@ -52,6 +52,8 @@ with tempfile.TemporaryDirectory(prefix='spark-provision-') as directory:
                     if process.poll() is not None or time.monotonic()>deadline:
                         log.seek(0);raise AssertionError(log.read())
                     time.sleep(.1)
+            config_record=call('/configs',{'name':'Provisioned config','data':{'ok':True}})
+            assert call('/configs/'+config_record['id'])['data']=={'ok':True}
             event=call('/events',{'calendar':'shared','name':'Provisioning','description':'Restricted user','occurs_at':'2035-01-01T00:00:00Z'})
             info=call('/calendar-sync')
             item=call('/calendar-sync/changes')['items'][0]
@@ -59,6 +61,20 @@ with tempfile.TemporaryDirectory(prefix='spark-provision-') as directory:
             result=call('/calendar-sync/apply',request)
             assert result['applied'] and call('/calendar-sync/apply',request)==result
             assert call('/events/'+event['id'])['description']=='Imported'
+            def wait_record(message):
+                deadline=time.monotonic()+10
+                while time.monotonic()<deadline:
+                    records=[json.loads(line) for line in (root/'server.log').read_text().splitlines() if line]
+                    found=[r for r in records if r['component']=='pulse.scheduler' and r['message']==message]
+                    if found:return found[-1]
+                    time.sleep(.1)
+                raise AssertionError('Missing scheduler log: '+message)
+            sql("REVOKE SELECT ON "+database+".pulse FROM '"+user+"'@'localhost';")
+            failure=wait_record('Background operation failed; retrying')
+            assert failure['details']['database_code']==1142 and failure['details']['operation']=='prepare'
+            sql("GRANT SELECT ON "+database+".pulse TO '"+user+"'@'localhost';")
+            recovery=wait_record('Background operation recovered')
+            assert recovery['details']['failed_attempts']>=1 and recovery['details']['outage_ms']>=0
         # Coordinator bookkeeping also needs INSERT and UPDATE, not just startup SELECT.
         for table in ('calendar_sync_connections','calendar_sync_baselines','calendar_sync_conflicts'):
             if table.endswith('connections'):

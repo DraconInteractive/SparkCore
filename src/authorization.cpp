@@ -33,6 +33,8 @@ const std::vector<RoutePolicy>& route_policies(){
         add("PUT","/connections/{id}/calendar-sync",{"admin.connections"});
         add("POST","/connections/{id}/calendar-sync/run",{"admin.connections"});
         add("GET","/connections/{id}/calendar-sync/conflicts",{"admin.connections"});
+        for(auto path:{"/configs","/configs/explorer","/configs/{id}","/configs/{id}/content"})add("GET",path,{"configs.read"});
+        add("POST","/configs",{"configs.write"});add("PATCH","/configs/{id}",{"configs.write"});add("DELETE","/configs/{id}",{"configs.write"});
         add("POST","/auth/verify",{});
         for(auto path:{"/backups","/backups/explorer","/backups/drives","/backups/jobs","/backups/{id}/files/{name}"})add("GET",path,{"admin.backup"});
         add("DELETE","/backups/jobs/completed",{"admin.backup"});add("DELETE","/backups/jobs/{id}",{"admin.backup"});add("DELETE","/backups/{id}",{"admin.backup"});add("POST","/backups/{id}/transfers",{"admin.backup"});add("POST","/backups/jobs/{id}/retry",{"admin.backup"});
@@ -114,6 +116,7 @@ bool notification_permitted(const Identity& who,const nlohmann::json& event){
     if(type.rfind("timer.",0)==0)permission="timers.read";
     else if(type.rfind("pulse.",0)==0)permission="pulse.read";
     else if(type.rfind("calendar.",0)==0)permission="events.read";
+    else if(type.rfind("config.",0)==0)permission="configs.read";
     else if(type.rfind("daily_tasks.",0)==0)permission="tasks.read";
     else if(type.rfind("file.",0)==0||type=="files.directories_updated"||type=="drives.updated")permission="files.read";
     else if(type.rfind("project.",0)==0)permission="projects.read";

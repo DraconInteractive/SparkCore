@@ -26,6 +26,10 @@ int main(){try{
     Identity reader{"id","watch","device",{"notifications.read","events.read"}};
     check(notification_permitted(reader,{{"type","calendar.reminder"}}),"reminder permission");
     for(const auto& type:{"timer.expired","file.created","project.updated","command.available","command.updated","device.updated","unknown"})check(!notification_permitted(reader,{{"type",type}}),"notification disclosure");
+    reader.permissions={"configs.read","notifications.read"};
+    check(notification_permitted(reader,{{"type","config.updated"}}),"config notification access");
+    reader.permissions={"configs.read"};
+    check(!notification_permitted(reader,{{"type","config.updated"}}),"config notifications require notification permission");
     reader.permissions={"commands.read","notifications.read"};check(!notification_permitted(reader,{{"type","command.available"}}),"nonexecutor availability");
     reader.permissions.insert("commands.execute");check(notification_permitted(reader,{{"type","command.available"}}),"executor availability");
     std::cout<<"Authorization route matrix, missing permissions, ownership and notification policy passed.\n";return 0;

@@ -1,3 +1,4 @@
+#include "logging.hpp"
 #include "inter_spark.hpp"
 #include "bounded_body.hpp"
 #include <openssl/evp.h>
@@ -98,7 +99,8 @@ struct Hub {
         std::string response;int status=process(args,[&](const char* b,size_t count){if(digest)digest->add(b,count);else{require(response.size()+count<=1048576,502,"remote_response_too_large");response.append(b,count);}});require(status==0,502,"remote_request_failed_check_tls_token_permissions_and_address");return response;
     }
     json test(json& connection){auto answer=json::parse(remote(connection,"POST","/auth/verify",json{{"device_id",connection["device_id"]}}.dump()));require(answer.value("authenticated",false)&&answer.value("device_id",std::string{})==connection["device_id"]&&answer.contains("permissions")&&answer["permissions"].is_array(),502,"remote_identity_not_verified");connection["permissions"]=answer["permissions"];connection["status"]="connected";connection["checked_at"]=time(nullptr);return public_connection(connection);}
-    void update(const std::string& id,const json& patch){std::lock_guard<std::mutex> lock(mutex);jobs[id].update(patch);save(control/"jobs.json",jobs);}
+    void update(const std::string& id,const json& patch){std::lock_guard<std::mutex> lock(mutex);if(patch.contains("state")&&patch["state"]!=jobs[id].value("state",json(nullptr)))log_event(patch["state"]=="failed"?"error":"info",jobs[id]["request"]["action"]=="calendar_sync"?"calendar.sync":"backup.transfer","Job state changed",{{"job_id",id},{"state",patch["state"]}});
+        jobs[id].update(patch);save(control/"jobs.json",jobs);}
     void transfer(std::string id,json request){
         try{
             if(request["action"]=="calendar_sync"){

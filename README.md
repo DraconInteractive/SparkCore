@@ -522,3 +522,10 @@ SPARK connections explorer at `/connections/explorer`. Enable it on the initiati
 instance and use Sync now; the peer token needs `calendar.sync.read` and
 `calendar.sync.write`. See [calendar sync setup and protocol](docs/calendar-sync.md)
 for migration 021, conflicts, retries and calendar move behaviour.
+
+Runtime logs now include UTC timestamps, severity, component names and safe
+MariaDB diagnostics. See [runtime logging](docs/logging.md) for recovery messages
+and capturing logs while running in tmux.
+
+Device JSON configuration: see [Configs](docs/configs.md) for the REST API,
+`/configs/explorer`, permissions, notifications and future optional schemas.

@@ -263,3 +263,10 @@ Shared-calendar sync imports use the same calendar.created/updated/deleted
 notifications as ordinary changes. Imported data always has calendar=shared.
 An unchanged or retried import emits no duplicate notification. Reminder
 delivery markers remain local to each instance. See [calendar sync](calendar-sync.md).
+
+## Config changes
+
+`config.created`, `config.updated` and `config.deleted` use `/configs/{id}`.
+Packets include `config_id` and `revision`, never config data, names or tags.
+Delivery requires `notifications.read` and `configs.read`; `/configs` is included
+in the welcome refresh resources for eligible clients. See [Configs](configs.md).

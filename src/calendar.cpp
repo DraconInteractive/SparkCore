@@ -1,3 +1,4 @@
+#include "logging.hpp"
 #include "bounded_body.hpp"
 #include "calendar.hpp"
 #include <charconv>
@@ -129,11 +130,11 @@ json calendar_sync_data(json packet) {
 }
 CalendarScheduler::CalendarScheduler(std::shared_ptr<CalendarStore> store) {
     worker_=std::thread([this,store]{
-        bool failed=false; std::unique_lock<std::mutex> lock(mutex_);
+        RetryLog retry("calendar.scheduler"); std::unique_lock<std::mutex> lock(mutex_);
         while(!stopping_) {
             lock.unlock();
-            try { store->tick(); if(failed) std::cerr<<"Calendar scheduler recovered\n"; failed=false; }
-            catch(const std::exception& error) { if(!failed) std::cerr<<"Calendar scheduler will retry: "<<error.what()<<'\n'; failed=true; }
+            try { store->tick(); retry.success(); }
+            catch(const std::exception& error) { retry.failure(error); }
             lock.lock(); wake_.wait_for(lock,std::chrono::seconds(1),[this]{return stopping_;});
         }
     });

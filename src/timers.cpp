@@ -1,3 +1,4 @@
+#include "logging.hpp"
 #include "bounded_body.hpp"
 #include "timers.hpp"
 #include <chrono>
@@ -18,17 +19,15 @@ bool valid_source(const json& packet) {
 }
 TimerScheduler::TimerScheduler(std::shared_ptr<TimerStore> store) {
     worker_ = std::thread([this, store] {
-        bool failed = false;
+        RetryLog retry("timer.scheduler");
         std::unique_lock<std::mutex> lock(mutex_);
         while (!stopping_) {
             lock.unlock();
             try {
                 store->expire();
-                if (failed) std::cerr << "Timer scheduler database connection recovered\n";
-                failed = false;
+                retry.success();
             } catch (const std::exception& error) {
-                if (!failed) std::cerr << "Timer scheduler will retry: " << error.what() << '\n';
-                failed = true;
+                retry.failure(error);
             }
             lock.lock();
             wake_.wait_for(lock, std::chrono::seconds(1), [this] { return stopping_; });
