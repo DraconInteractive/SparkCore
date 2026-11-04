@@ -331,3 +331,48 @@ Already-open downloads may finish. Folder mutations wait for active file transfe
 
 In `/files/explorer`, each folder row offers **Rename / Move** and **Delete**.
 Deletion defaults to empty folders; a checkbox explicitly enables deleting contents.
+
+## Expiring public download links
+
+In `/files/explorer`, select **Share** beside a file, choose an expiry in your
+local time, then **Generate link**. Copy the displayed link; it is only shown once.
+The same dialog lists existing leases and lets you revoke them early.
+
+Creating, listing and revoking leases requires **both `files.read` and `files.share`**.
+Existing tokens must be provisioned with the new `files.share` permission to use
+this feature. Open instances also support leases, although their normal downloads
+remain public as before.
+
+- `POST /files/{id}/leases` with `{"expires_at":"2026-12-01T12:00:00Z"}` creates
+  a lease. Use a future UTC timestamp with whole seconds in exactly this format.
+  HTTP 201 returns its ID, file ID, content revision, creation/expiry times,
+  active state and relative `download_url`. Resolve that path against the SPARK
+  origin clients can reach (for example `https://spark.dracon.au`).
+- `GET /files/{id}/leases?limit=50&offset=0` lists metadata, newest first.
+  Limit is 1–100; offset 0–1,000,000. No secret or download URL is returned.
+- `DELETE /files/{id}/leases/{lease_id}` revokes a lease, returning HTTP 204.
+- `GET /downloads/{token}` serves the file without a login or Authorization header.
+  HEAD and byte ranges work too, including resumable downloads while valid.
+
+Anyone holding the URL can use or forward it. Each link contains 256 bits of
+cryptographically random secret material; only its SHA-256 hash is stored in
+MariaDB. The URL must be treated as a credential, including in proxy access logs.
+Responses use attachment disposition, `nosniff`, `no-store` and `no-referrer`.
+The API returns relative links rather than trusting client-supplied Host headers.
+
+Expiry is checked against the database UTC clock on every request. Invalid,
+expired, revoked, deleted or content-replaced links all return HTTP 404
+`download_unavailable`. Offline drives return HTTP 503; a link can work again
+when the drive returns, provided it has not expired. Moving a file between
+folders preserves its links. Replacing file content invalidates old links.
+An existing download can finish after expiry or revocation; every new request,
+including a resume request, must still have a valid lease.
+
+Leases survive restarts and credential rotation/revocation independently of the
+creating user's token. Revoke a lease explicitly to end access. Database backups
+include leases; restoring an older backup can restore a revoked lease if its
+expiry is still in the future. Expired leases remain visible for manual removal;
+file deletion removes its leases automatically. No file contents are duplicated.
+
+Deploy with a rebuild and `./scripts/setup-db.sh` before restarting; migration
+`023_file_leases.sql` creates the table and setup grants the application access.

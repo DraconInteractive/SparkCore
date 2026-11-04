@@ -27,7 +27,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.43.0";
+constexpr auto api_version = "1.44.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -146,7 +146,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     server.set_default_headers({{"Cache-Control", "no-store"}, {"Access-Control-Allow-Origin", "*"}, {"Access-Control-Expose-Headers", "ETag, Content-Range"}});
     if(auth)server.set_default_headers({{"Cache-Control","no-store"}});
     server.set_pre_routing_handler([endpoints,auth](const auto& request, auto& response) {
-        if(auth&&!browser_public_route(request)&&!auth->request(request,response)){
+        if(auth&&!browser_public_route(request)&&!public_file_download_route(request)&&!auth->request(request,response)){
             if(response.status==401&&(request.method=="GET"||request.method=="HEAD")&&!request.has_header("Authorization")&&request.get_header_value("Accept").find("text/html")!=std::string::npos && (request.path=="/"||request.path=="/api/docs"||request.path=="/files/explorer"||request.path=="/projects/explorer"||request.path=="/commands/explorer"||request.path=="/configs/explorer"||request.path=="/admin/credentials/explorer"||request.path=="/backups/new"||request.path=="/backups/progress"||request.path=="/backups/explorer"||request.path=="/connections/explorer")){
                 response.body.clear();response.set_redirect("/login?next="+request.path,303);
             }

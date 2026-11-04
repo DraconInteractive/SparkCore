@@ -875,6 +875,7 @@ std::uint64_t FileStore::database_bytes() const {
 }
 void FileStore::verify() const {
     Connection c(config_);
+    {Statement leases(c,"SELECT id,file_id,token_hash,content_revision,expires_at,created_at FROM file_leases LIMIT 0");leases.execute();}
     { Statement q(c,"SELECT "+file_projection+",state FROM files LIMIT 0"); q.execute(); }
     Statement dirs(c,"SELECT path FROM file_directories LIMIT 0");dirs.execute();
 }
@@ -1406,5 +1407,30 @@ bool ConfigStore::remove(const std::string& id,uint64_t revision) const {
     if(revision>=9007199254740991ULL)throw std::invalid_argument("revision_exhausted");
     Statement remove(c,"DELETE FROM configs WHERE id=?",{id});remove.execute();
     (*current)["revision"]=revision+1;config_event(c,"deleted",*current);tx.commit();return true;
+}
+}
+
+namespace spark {
+namespace {
+const std::string lease_projection="JSON_OBJECT('id',id,'file_id',file_id,'content_revision',content_revision,'expires_at',DATE_FORMAT(expires_at,'%Y-%m-%dT%H:%i:%sZ'),'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'active',IF(expires_at>UTC_TIMESTAMP() AND EXISTS(SELECT 1 FROM files WHERE files.id=file_leases.file_id AND files.state='ready' AND files.content_revision=file_leases.content_revision),TRUE,FALSE))";
+}
+json FileStore::create_lease(const std::string& file,const std::string& hash,const std::string& expires) const {
+    Connection c(config_);Transaction tx(c);
+    Statement read(c,"SELECT JSON_QUOTE(content_revision) FROM files WHERE id=? AND state='ready' FOR UPDATE",{file});read.execute();auto rows=read.rows();
+    if(rows.empty())throw std::invalid_argument("file_not_found");
+    auto id=sync_uuid(c);
+    Statement insert(c,"INSERT INTO file_leases(id,file_id,token_hash,content_revision,expires_at) SELECT ?,?,?,?,? WHERE ?>UTC_TIMESTAMP()",{id,file,hash,rows[0].get<std::string>(),expires,expires});insert.execute();
+    if(!insert.changed())throw std::invalid_argument("invalid_expires_at");
+    Statement result(c,"SELECT "+lease_projection+" FROM file_leases WHERE id=?",{id});result.execute();auto record=result.rows()[0];tx.commit();return record;
+}
+json FileStore::leases(const std::string& file,int limit,int offset) const {
+    Connection c(config_);Statement q(c,"SELECT "+lease_projection+" FROM file_leases WHERE file_id=? ORDER BY created_at DESC,id LIMIT ? OFFSET ?",{file,std::to_string(limit+1),std::to_string(offset)});q.execute();auto rows=q.rows();bool more=rows.size()>size_t(limit);if(more)rows.erase(rows.end()-1);
+    return {{"leases",rows},{"has_more",more},{"limit",limit},{"offset",offset}};
+}
+bool FileStore::revoke_lease(const std::string& file,const std::string& lease) const {
+    Connection c(config_);Statement q(c,"DELETE FROM file_leases WHERE id=? AND file_id=?",{lease,file});q.execute();return q.changed();
+}
+std::optional<json> FileStore::leased_file(const std::string& hash) const {
+    Connection c(config_);Statement q(c,"SELECT "+file_projection+" FROM files WHERE state='ready' AND EXISTS(SELECT 1 FROM file_leases WHERE file_leases.file_id=files.id AND file_leases.content_revision=files.content_revision AND token_hash=? AND expires_at>UTC_TIMESTAMP())",{hash});q.execute();auto rows=q.rows();return rows.empty()?std::nullopt:std::optional<json>(rows[0]);
 }
 }

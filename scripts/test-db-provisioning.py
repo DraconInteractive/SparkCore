@@ -52,6 +52,13 @@ with tempfile.TemporaryDirectory(prefix='spark-provision-') as directory:
                     if process.poll() is not None or time.monotonic()>deadline:
                         log.seek(0);raise AssertionError(log.read())
                     time.sleep(.1)
+            payload=b'lease grant test'
+            req=urllib.request.Request('http://127.0.0.1:'+str(http_port)+'/files?name=grants.txt',data=payload,headers={'Content-Type':'application/octet-stream'})
+            with urllib.request.urlopen(req,timeout=5) as response:file_record=json.load(response)
+            lease=call('/files/'+file_record['id']+'/leases',{'expires_at':'2099-01-01T00:00:00Z'})
+            with urllib.request.urlopen('http://127.0.0.1:'+str(http_port)+lease['download_url'],timeout=5) as response:assert response.read()==payload
+            req=urllib.request.Request('http://127.0.0.1:'+str(http_port)+'/files/'+file_record['id']+'/leases/'+lease['id'],method='DELETE')
+            with urllib.request.urlopen(req,timeout=5) as response:assert response.status==204
             config_record=call('/configs',{'name':'Provisioned config','data':{'ok':True}})
             assert call('/configs/'+config_record['id'])['data']=={'ok':True}
             event=call('/events',{'calendar':'shared','name':'Provisioning','description':'Restricted user','occurs_at':'2035-01-01T00:00:00Z'})

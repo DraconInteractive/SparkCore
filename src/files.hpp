@@ -11,6 +11,10 @@ class FileStore {
 public:
     explicit FileStore(DatabaseConfig config): config_(std::move(config)) {}
     void verify() const;
+    nlohmann::json create_lease(const std::string& file,const std::string& hash,const std::string& expires) const;
+    nlohmann::json leases(const std::string& file,int limit,int offset) const;
+    bool revoke_lease(const std::string& file,const std::string& lease) const;
+    std::optional<nlohmann::json> leased_file(const std::string& hash) const;
     std::uint64_t database_bytes() const;
     nlohmann::json layout() const;
     void register_drives(const std::vector<std::string>& drives,const nlohmann::json& assignments, const nlohmann::json& roots, bool anchor) const;
@@ -67,6 +71,7 @@ private:
     std::once_flag initialized_;
 
 };
+bool public_file_download_route(const httplib::Request&);
 void configure_files(httplib::Server&,std::shared_ptr<FileStorage>, std::shared_ptr<Authorization> auth = nullptr);
 nlohmann::json file_endpoints();
 }

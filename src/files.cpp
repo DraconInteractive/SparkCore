@@ -1,4 +1,7 @@
 #include "logging.hpp"
+#include "calendar.hpp"
+#include <openssl/rand.h>
+#include <openssl/evp.h>
 #include "files.hpp"
 #include "folder_downloads.hpp"
 #include "file_explorer.hpp"
@@ -20,6 +23,10 @@
 namespace spark {
 namespace {
 using nlohmann::json;
+std::string lease_hex(const unsigned char* bytes,size_t length){std::string out;const char* digits="0123456789abcdef";for(size_t i=0;i<length;++i){out+=digits[bytes[i]>>4];out+=digits[bytes[i]&15];}return out;}
+std::string lease_secret(){unsigned char bytes[32];if(RAND_bytes(bytes,sizeof(bytes))!=1)throw std::runtime_error("random_failed");return lease_hex(bytes,sizeof(bytes));}
+std::string lease_hash(const std::string& secret){unsigned char bytes[EVP_MAX_MD_SIZE];unsigned length=0;if(EVP_Digest(secret.data(),secret.size(),bytes,&length,EVP_sha256(),nullptr)!=1)throw std::runtime_error("digest_failed");return lease_hex(bytes,length);}
+
 struct StorageError : std::runtime_error {
     int status;
     explicit StorageError(int error):std::runtime_error(error==ENOSPC || error==EDQUOT?"insufficient_storage":"storage_unavailable"),status(error==ENOSPC || error==EDQUOT?507:503){}
@@ -262,6 +269,9 @@ void FileStorage::mount_roots(bool startup){
             sync_directory();
         }catch(...){for(auto& drive:drives_){if(drive.lock>=0)close(drive.lock);if(drive.fd>=0)close(drive.fd);drive.lock=drive.fd=-1;drive.id.clear();}throw;}
 }
+bool public_file_download_route(const httplib::Request& request){
+    return (request.method=="GET"||request.method=="HEAD")&&std::regex_match(request.path,std::regex("/downloads/[0-9a-f]{64}"));
+}
 void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storage, std::shared_ptr<Authorization> auth){
     configure_folder_downloads(server,storage,auth);
     auto upload=[storage,auth](const httplib::Request& request,httplib::Response& response,const httplib::ContentReader& read){
@@ -350,9 +360,11 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
         catch(const std::exception&){cleanup();bad(503,"storage_unavailable");}
     });
     auto handler=[storage](const httplib::Request& request,httplib::Response& response){
-        const bool collection=request.path=="/files",download=request.path.size()>8 && request.path.compare(request.path.size()-8,8,"/content")==0;
+        const bool leased=request.path.rfind("/downloads/",0)==0;
+        if(leased){response.set_header("Cache-Control","private, no-store");response.set_header("Referrer-Policy","no-referrer");response.set_header("X-Content-Type-Options","nosniff");}
+        const bool collection=request.path=="/files",download=leased||request.path.size()>8 && request.path.compare(request.path.size()-8,8,"/content")==0;
         std::string id;
-        if(!collection){id=request.matches[1].str();if(!valid_id(id)){failure(response,400,"invalid_file_id");return;}}
+        if(!collection&&!leased){id=request.matches[1].str();if(!valid_id(id)){failure(response,400,"invalid_file_id");return;}}
         int limit=100,offset=0;std::optional<std::string> directory,drive;
         if(collection){
             for(const auto& [key,value]:request.params){
@@ -380,7 +392,8 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
                 if(!storage->store->deleting(id)){failure(response,404,"file_not_found");return;}
                 storage->erase_bytes(id);storage->store->forget(id);response.status=204;return;
             }
-            auto record=storage->store->get(id);if(!record){failure(response,404,"file_not_found");return;}
+            auto record=leased?storage->store->leased_file(lease_hash(request.matches[1].str())):storage->store->get(id);if(!record){failure(response,404,leased?"download_unavailable":"file_not_found");return;}
+            id=(*record)["id"].get<std::string>();
             if(!download){reply(response,200,*record);return;}
             auto transfer=std::make_shared<std::shared_lock<std::shared_mutex>>(std::move(gate));
             auto file=std::make_shared<Descriptor>(open(storage->content_path(*record).c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW));
@@ -401,6 +414,43 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
         catch(const StorageError& error){failure(response,error.status,error.what());}
         catch(const std::exception&){failure(response,503,"storage_unavailable");}
     };
+    auto leases=[storage](const httplib::Request& request,httplib::Response& response){
+        response.set_header("Cache-Control","no-store");response.set_header("Referrer-Policy","no-referrer");
+        const std::string file=request.matches[1].str();
+        if(!valid_id(file)){failure(response,400,"invalid_file_id");return;}
+        try{
+            std::shared_lock<std::shared_mutex> gate(storage->project_gate);storage->initialize();
+            if(!storage->store->get(file)){failure(response,404,"file_not_found");return;}
+            if(request.method=="GET"||request.method=="HEAD"){
+                int limit=50,offset=0;
+                for(const auto& [key,value]:request.params){
+                    if((key!="limit"&&key!="offset")||request.get_param_value_count(key)!=1){failure(response,400,"invalid_parameters");return;}
+                    auto parsed=integer(value,key=="limit"?1:0,key=="limit"?100:1000000);if(parsed<0){failure(response,400,"invalid_pagination");return;}(key=="limit"?limit:offset)=parsed;
+                }
+                reply(response,200,storage->store->leases(file,limit,offset));return;
+            }
+            if(!request.params.empty()){failure(response,400,"invalid_parameters");return;}
+            if(request.method=="DELETE"){
+                if(!request.body.empty()){failure(response,400,"unexpected_body");return;}
+                const std::string id=request.matches[2].str();if(!valid_id(id)){failure(response,400,"invalid_lease_id");return;}
+                if(!storage->store->revoke_lease(file,id)){failure(response,404,"lease_not_found");return;}response.status=204;return;
+            }
+            if(request.get_header_value("Content-Type").substr(0,request.get_header_value("Content-Type").find(';'))!="application/json"){failure(response,415,"unsupported_media_type");return;}
+            const auto packet=json::parse(request.body,nullptr,false);
+            if(!packet.is_object()||packet.size()!=1||!packet.contains("expires_at")||!packet["expires_at"].is_string()){failure(response,400,"invalid_expires_at");return;}
+            auto expires=packet["expires_at"].get<std::string>();
+            if(!std::regex_match(expires,std::regex("[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"))||calendar_timestamp(calendar_instant(expires))!=expires){failure(response,400,"invalid_expires_at");return;}
+            expires[10]=' ';expires.pop_back();const auto secret=lease_secret();
+            auto record=storage->store->create_lease(file,lease_hash(secret),expires);record["download_url"]="/downloads/"+secret;
+            reply(response,201,record);
+        }catch(const std::invalid_argument& e){failure(response,std::string(e.what())=="file_not_found"?404:400,e.what());}
+        catch(const DatabaseError&){failure(response,503,"database_unavailable");}
+        catch(const std::exception&){failure(response,503,"storage_unavailable");}
+    };
+    server.Get(R"(/downloads/([0-9a-f]{64}))",handler);
+    server.Get(R"(/files/([^/]+)/leases)",leases);
+    body_route(server,"POST",R"(/files/([^/]+)/leases)",leases,auth);
+    body_route(server,"DELETE",R"(/files/([^/]+)/leases/([^/]+))",leases,auth);
     auto drive_handler=[storage](const httplib::Request& request,httplib::Response& response){
         if(!request.params.empty()){failure(response,400,"invalid_parameters");return;}
         try{
@@ -507,6 +557,12 @@ json file_endpoints(){
             {"output",{{"status",get?200:remove?204:201},{"body",get?json{{"drives",json::array({drive})}}:remove?json(nullptr):drive}}},
             {"errors",{{"400","invalid_drive_path, invalid_parameters"},{"403","cross_site_request"},{"404","drive_not_found"},{"409","persistent_drive, drive_already_attached, duplicate_drive_identity, overlapping_drive_path, drive_directory_not_empty, too_many_drives"},{"415","unsupported_media_type"},{"503","storage_unavailable, database_unavailable"}}}});
     }
+    const json lease={{"id","12345678-1234-1234-1234-123456789abc"},{"file_id",file["id"]},{"content_revision",""},{"created_at","2026-11-04T00:00:00.000000Z"},{"expires_at","2026-11-05T00:00:00Z"},{"active",true}};
+    auto created=lease;created["download_url"]="/downloads/<64-character-secret>";
+    endpoints.push_back({{"method","POST"},{"path","/files/{id}/leases"},{"description","Create an expiring public download for this content revision. Requires files.read and files.share. expires_at must be a future UTC timestamp YYYY-MM-DDTHH:MM:SSZ. The relative download_url is a bearer secret returned only once; resolve against this SPARK instance's origin. Links survive restart and credential rotation; revoke them explicitly. Existing transfers may finish after expiry or revocation."},{"input",{{"headers",{{"Content-Type","application/json"}}},{"body",{{"expires_at","2026-11-05T00:00:00Z"}}}}},{"output",{{"status",201},{"body",created}}}});
+    endpoints.push_back({{"method","GET"},{"path","/files/{id}/leases"},{"description","List leases, newest first, without their secrets. active is false after expiry or content replacement; drive availability is separate. Revoked leases are removed. Requires files.read and files.share."},{"input",{{"query",{{"limit","1..100, default 50"},{"offset","0..1000000, default 0"}}}}},{"output",{{"status",200},{"body",{{"leases",json::array({lease})},{"limit",50},{"offset",0},{"has_more",false}}}}}});
+    endpoints.push_back({{"method","DELETE"},{"path","/files/{id}/leases/{lease_id}"},{"description","Revoke a public download immediately for new requests. Requires files.read and files.share. No body."},{"input",{{"body",nullptr}}},{"output",{{"status",204},{"body",nullptr}}}});
+    endpoints.push_back({{"method","GET"},{"path","/downloads/{token}"},{"access","public bearer link"},{"description","Download the leased file without Authorization. GET/HEAD and byte ranges supported. Invalid, expired, revoked, deleted or replaced files return 404 download_unavailable. Offline storage returns 503. Always an attachment with no-store and no-referrer. The URL secret grants access to one file revision only."},{"input",{{"body",nullptr}}},{"output",{{"status",200},{"body","Raw file bytes"}}}});
     return endpoints;
 }
 }
