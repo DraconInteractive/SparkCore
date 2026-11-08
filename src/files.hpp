@@ -26,7 +26,7 @@ public:
     nlohmann::json publish(const std::string& id, std::uint64_t size) const;
     std::optional<nlohmann::json> get(const std::string& id) const;
     nlohmann::json list(int limit, int offset, const std::optional<std::string>& directory = std::nullopt, const std::optional<std::string>& drive = std::nullopt) const;
-    std::optional<nlohmann::json> move(const std::string& id, const std::string& directory) const;
+    std::optional<nlohmann::json> move(const std::string& id, const std::optional<std::string>& directory, const std::optional<std::string>& name = std::nullopt) const;
     nlohmann::json directories(const std::optional<std::string>& drive = std::nullopt) const;
     std::string default_drive(const std::string& directory = "/") const;
     void create_directory(const std::string& directory, const std::optional<std::string>& drive = std::nullopt) const;

@@ -38,6 +38,11 @@ int main() {
         check(api && api->status == 200, "discovery status");
         auto document = nlohmann::json::parse(api->body);
         check(document["authentication"] == "none", "authentication");
+        check(document["client_setup"]["overview"]["current_authentication"]=="none","open client setup mode");
+        check(document["client_setup"]["tcp"]["authenticated_hello"]["token"]=="<device-token>","open discovery includes token hello");
+        check(document["client_setup"]["tcp"]["authenticated_resume_hello"]["after_sequence"]==42,"authenticated resume example");
+        check(document["client_setup"]["tcp"]["wire_example"].get<std::string>().back()=='\n',"hello wire newline");
+        check(!document["notifications"]["hello"].contains("token"),"open active hello stays open");
         check(document["endpoints"].size() == 133, "endpoint count");
         for (const auto& endpoint : document["endpoints"]) {
             if(endpoint["path"].get<std::string>().rfind("/configs",0)==0 || endpoint["path"].get<std::string>().rfind("/calendar-sync",0)==0 || endpoint.contains("access") || endpoint["path"].get<std::string>().rfind("/backups",0)==0 || endpoint["path"].get<std::string>().rfind("/connections",0)==0)continue;

@@ -1,4 +1,5 @@
 #include "configs.hpp"
+#include "client_setup.hpp"
 #include "api.hpp"
 #include "credential_management.hpp"
 #include "browser_auth.hpp"
@@ -27,7 +28,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.44.0";
+constexpr auto api_version = "1.46.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -55,6 +56,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
          json::object(), {{"name", "string: SPARK"}, {"server_version", "string: server release"},
           {"api_version", "string: API contract revision"}, {"authentication", "string: none (open mode) or bearer (token mode)"},
           {"polling", "object: polling and compatibility guidance"},
+          {"client_setup", "object: authenticated REST, TCP hello, provisioning, permissions, TLS and browser-session setup; includes token-mode instructions even in open mode"},
           {"notifications", "object: TCP connection, framing, handshake, heartbeats, and reconnect contract"},
           {"errors", "array: shared HTTP error packets"},
           {"endpoints", "array: method, path, description, input, and output for every endpoint"}}}
@@ -110,10 +112,10 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     discovery["endpoints"][2]["output"]["body"] = {
         {"name", "SPARK"}, {"server_version", SPARK_VERSION}, {"api_version", api_version},
         {"authentication", "none"}, {"polling", json::object()},
-        {"notifications", json::object()}, {"errors", json::array()}, {"endpoints", json::array()}
+        {"notifications", json::object()}, {"client_setup",json::object()}, {"errors", json::array()}, {"endpoints", json::array()}
     };
     discovery["endpoints"][2]["output"]["example_note"] =
-        "Abbreviated response shape only. See the top-level polling, notifications, errors and endpoints for their full contents; they are not duplicated here.";
+        "Abbreviated response shape only. See the top-level client_setup, polling, notifications, errors and endpoints for their full contents; they are not duplicated here.";
     if(auth) {
         discovery["authentication"]="bearer";
         discovery["endpoints"][2]["output"]["body"]["authentication"]="bearer";
@@ -134,6 +136,11 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
             if(!found && endpoint["path"]=="/pulse/subscriptions/{device_id}"){endpoint["permissions"]={"pulse.write"};found=true;}
             if(!found)throw std::runtime_error("Endpoint is missing an authorization policy");
         }
+    }
+    discovery["client_setup"]=client_setup_contract(discovery["notifications"],discovery["authentication"]);
+    if(!auth)for(auto& endpoint:discovery["endpoints"]){
+        if(endpoint.contains("access"))continue;
+        for(const auto& rule:route_policies())if(endpoint["method"]==rule.method&&std::regex_replace(endpoint["path"].get<std::string>(),std::regex(R"(\{[^}]+\})"),"{}") == std::regex_replace(rule.path,std::regex(R"(\{[^}]+\})"),"{}")){endpoint["permissions"]=rule.permissions;break;}
     }
     endpoints[2].body = discovery;
 

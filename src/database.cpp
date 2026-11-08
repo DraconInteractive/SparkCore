@@ -930,12 +930,14 @@ json FileStore::change_directory(const std::string& drive,const std::string& dir
     json ids=json::array();for(const auto& file:files){ids.push_back(file["id"]);if(file["state"]=="ready")append_event(c,destination?"file.updated":"file.deleted","/files/"+file["id"].get<std::string>(),nullptr,json::object());}
     append_event(c,"files.directories_updated","/files/directories",nullptr,{{"drive_id",drive}});tx.commit();return ids;
 }
-std::optional<json> FileStore::move(const std::string& id,const std::string& directory) const {
+std::optional<json> FileStore::move(const std::string& id,const std::optional<std::string>& directory,const std::optional<std::string>& name) const {
     Connection c(config_);Transaction tx(c);
     Statement read(c,"SELECT "+file_projection+" FROM files WHERE id=? AND state='ready' FOR UPDATE",{id});read.execute();auto rows=read.rows();if(rows.empty())return std::nullopt;
-    if(rows[0]["directory"]!=directory){
-        ensure_directories(c,directory,rows[0]["drive_id"].is_null()?"":rows[0]["drive_id"].get<std::string>());
-        Statement q(c,"UPDATE files SET directory=? WHERE id=?",{directory,id});q.execute();rows[0]["directory"]=directory;
+    const auto destination=directory.value_or(rows[0]["directory"].get<std::string>());
+    const auto filename=name.value_or(rows[0]["name"].get<std::string>());
+    if(rows[0]["directory"]!=destination || rows[0]["name"]!=filename){
+        if(rows[0]["directory"]!=destination)ensure_directories(c,destination,rows[0]["drive_id"].is_null()?"":rows[0]["drive_id"].get<std::string>());
+        Statement q(c,"UPDATE files SET directory=?,name=? WHERE id=?",{destination,filename,id});q.execute();rows[0]["directory"]=destination;rows[0]["name"]=filename;
         append_event(c,"file.updated","/files/"+id,nullptr,json::object());
     }
     tx.commit();return rows[0];

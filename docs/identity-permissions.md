@@ -37,7 +37,8 @@ are rejected. Empty stores and identities without permissions are valid and gran
 nothing. Limits: 1 MiB, 1,024 records. The store must be a regular file owned by the
 process user, without group/other permissions (normally `0600`). Keep its parent
 directory private and outside shared SPARK file storage. Run the tool as the same
-OS user as SPARK. There is deliberately no HTTP provisioning endpoint yet.
+OS user as SPARK. Device credentials can also be issued through `/admin/credentials/explorer` or
+`POST /admin/credentials` by an administrator holding the required grants.
 
 ```sh
 mkdir -m 700 ~/.config/spark
@@ -228,3 +229,26 @@ the new credential ID and raw token. Existing tokens remain valid. Log out of
 the browser and log back in with the new token to use its new permissions.
 The helper obtains every permission from the compiled credential tool, including
 new grants such as `calendar.sync.read` and `calendar.sync.write`.
+
+
+## Client setup reference
+
+Open `/api/docs#client-setup` for REST, TCP and browser-session setup. The same
+information is in `/api` under `client_setup`, in both open and token modes.
+`authentication` and `notifications.hello` describe the active instance; the setup
+guide additionally shows token-mode hello and reconnect examples even on open
+instances. Endpoint permission lists describe requirements when token mode is used.
+
+Device clients use `Authorization: Bearer <device-token>` for REST and the raw
+same token in the TCP hello's `token` field (no `Bearer ` prefix):
+
+```json
+{"type":"hello","device_id":"watch-1","token":"<device-token>"}
+```
+
+Terminate that single-line JSON with a newline, and include the token again on
+reconnect. Add `after_sequence` only when resuming a durably processed cursor.
+Use the advertised transport/host/port; verify certificates and hostname for
+`tcp+tls`. TCP is not WebSocket or HTTP and browser cookies do not authenticate it.
+The guide also covers provisioning, device identity, grants, permission inspection,
+heartbeats, reconnect catchup, errors and the separate administrator browser flow.

@@ -108,6 +108,10 @@ try:
                 proxy.check_transport()
                 browser_request,browser_headers=proxy.browser_session(admin)
             contract=call('GET','/api',admin)
+            assert contract['client_setup']['overview']['current_authentication']=='bearer'
+            assert contract['client_setup']['tcp']['authenticated_hello']==contract['notifications']['hello']
+            assert contract['client_setup']['tcp']['connection']['port']==contract['notifications']['port']
+            assert contract['client_setup']['rest']['header']['Authorization']=='Bearer <device-token>'
             if proxy:
                 assert contract['notifications']['transport']=='tcp+tls'
                 assert contract['notifications']['port']==proxy.tcp

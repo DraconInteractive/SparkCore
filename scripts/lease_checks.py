@@ -30,6 +30,31 @@ def check_leases(call, issue, admin, sql, connection):
         assert response.getheader('Content-Disposition').startswith('attachment;')
     finally:
         c.close()
+    call('PATCH',path,reader,{'name':'forbidden.txt'},403)
+    for value in ['', '.', '..', 'a/b', 'a\\b', 'bad\nname', 'x'*256, None, 123]:
+        call('PATCH',path,admin,{'name':value},400)
+    call('PATCH',path,admin,{},400)
+    call('PATCH',path,admin,{'name':'ok.txt','unknown':True},400)
+    renamed=call('PATCH',path,admin,{'name':'renamed résumé.txt'})
+    assert renamed['name']=='renamed résumé.txt' and renamed['id']==file['id']
+    assert renamed['directory']==file['directory'] and renamed['content_revision']==file['content_revision'] and renamed['download_url']==file['download_url']
+    count=sql("SELECT COUNT(*) FROM events WHERE type='file.updated' AND resource='"+path+"'")
+    assert count=='1'
+    assert call('PATCH',path,admin,{'name':'renamed résumé.txt'})==renamed
+    assert sql("SELECT COUNT(*) FROM events WHERE type='file.updated' AND resource='"+path+"'")==count
+    c=connection()
+    try:
+        c.request('GET',public);r=c.getresponse();assert r.read()==secret
+        assert 'renamed%20r%C3%A9sum%C3%A9.txt' in r.getheader('Content-Disposition')
+    finally:c.close()
+    sql("DELIMITER //\nCREATE TRIGGER rename_event_failure BEFORE INSERT ON events FOR EACH ROW BEGIN IF NEW.type='file.updated' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture failure'; END IF; END//\nDELIMITER ;\n")
+    try:
+        call('PATCH',path,admin,{'name':'rolled-back.txt','directory':'/rollback-rename'},503)
+        assert call('GET',path,admin)==renamed
+        assert '/rollback-rename' not in call('GET','/files/directories',admin)['directories']
+    finally:sql('DROP TRIGGER rename_event_failure')
+    moved=call('PATCH',path,admin,{'name':'moved.txt','directory':'/combined-rename'})
+    assert moved['name']=='moved.txt' and moved['directory']=='/combined-rename'
     assert call('GET',public)==secret
     assert call('GET',public,'invalid-token')==secret
     assert call('HEAD',public)==b''

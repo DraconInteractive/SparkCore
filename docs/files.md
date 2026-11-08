@@ -162,6 +162,15 @@ are rejected. Duplicate filenames within the same directory remain allowed.
 - `GET /files?directory=%2Fdocuments`: list files directly in `/documents`, with
   normal pagination. Without the filter, the endpoint still lists all files.
 - `PATCH /files/{id}` with `{"directory":"/archive/2026"}`: move the file.
+- `PATCH /files/{id}` with `{"name":"new-name.txt"}`: rename the file, including its extension.
+  Both fields can be supplied together to rename and move atomically. At least one
+  is required; unknown fields are rejected. Requires `files.write` and an online
+  drive. Names follow the same rules as uploads (1–255 UTF-8 bytes, no slashes,
+  backslashes or control characters; `.` and `..` are rejected). Duplicate names
+  remain allowed. ID, content revision, bytes, normal download URL and active
+  public leases remain unchanged; new downloads use the new filename. Changes
+  emit one `file.updated` notification; identical edits emit none. The explorer
+  provides a **Rename** button next to each file. No schema migration is needed.
   Missing parents are created in the same transaction. File ID, download URL,
   bytes and creation timestamp remain unchanged. Repeating the same move is a no-op.
 - `GET /files/directories`: returns `{"directories":["/","/documents",...]}`,
