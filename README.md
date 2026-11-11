@@ -13,7 +13,7 @@ On antiX/Debian, install and start MariaDB using its SysV service script:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y mariadb-server libmariadb-dev libssl-dev pkg-config
+sudo apt-get install -y mariadb-server libmariadb-dev libssl-dev libarchive-dev pkg-config
 sudo service mariadb start
 ./scripts/setup-db.sh
 ```
@@ -529,3 +529,5 @@ and capturing logs while running in tmux.
 
 Device JSON configuration: see [Configs](docs/configs.md) for the REST API,
 `/configs/explorer`, permissions, notifications and future optional schemas.
+
+Project ZIP exports, imports and conflict review: [project transfers](docs/project-transfers.md).

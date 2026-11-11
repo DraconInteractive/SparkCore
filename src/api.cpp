@@ -1,3 +1,4 @@
+#include "project_transfer.hpp"
 #include "configs.hpp"
 #include "client_setup.hpp"
 #include "api.hpp"
@@ -28,7 +29,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.48.0";
+constexpr auto api_version = "1.49.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -99,6 +100,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         {"output", {{"status", 200}, {"headers", {{"Content-Type", "text/html; charset=utf-8"}, {"Cache-Control", "no-store"}}}, {"body", "HTML API reference page"}}}
     });
     for (const auto& endpoint : board_endpoints()) discovery["endpoints"].push_back(endpoint);
+    for (const auto& endpoint : project_transfer_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : project_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : folder_download_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : file_endpoints()) discovery["endpoints"].push_back(endpoint);
@@ -166,7 +168,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
             const auto value=request.get_header_value("Content-Length");std::uint64_t length=0;
             const auto parsed=std::from_chars(value.data(),value.data()+value.size(),length);
             if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || request.get_header_value_count("Content-Length")!=1 || request.has_header("Transfer-Encoding"))return reject(400,"invalid_content_length");
-            if(!upload && length>(text_edit?2097152:request.path=="/calendar-sync/apply"?65536:(request.path=="/configs"||std::regex_match(request.path,std::regex(R"(/configs/[^/]+)")))?131072:16384))return reject(413,"payload_too_large");
+            if(!upload && length>(std::regex_match(request.path,std::regex(R"(/projects/transfers/[0-9a-f]{32}/apply)"))?16777216:text_edit?2097152:request.path=="/calendar-sync/apply"?65536:(request.path=="/configs"||std::regex_match(request.path,std::regex(R"(/configs/[^/]+)")))?131072:16384))return reject(413,"payload_too_large");
         }
         if(request.has_header("Transfer-Encoding") && request.method!="POST" && request.method!="PATCH" && request.method!="PUT" && request.method!="DELETE")return reject(400,"unexpected_body");
         std::string timer_allow;
@@ -186,7 +188,9 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         else if(std::regex_match(request.path,std::regex(R"(/projects/[^/]+/boards/[^/]+/columns/[^/]+)")))timer_allow="PATCH, DELETE, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/projects/[^/]+/boards/[^/]+/columns/[^/]+/tasks)")))timer_allow="POST, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/projects/[^/]+/boards/[^/]+/tasks/[^/]+)")))timer_allow="GET, HEAD, PATCH, DELETE, OPTIONS";
-        if(request.path=="/projects/explorer")timer_allow="GET, HEAD, OPTIONS";
+        if(request.path=="/projects/imports"||std::regex_match(request.path,std::regex(R"(/projects/[^/]+/export)"))||std::regex_match(request.path,std::regex(R"(/projects/transfers/[0-9a-f]{32}/apply)")))timer_allow="POST, OPTIONS";
+        else if(std::regex_match(request.path,std::regex(R"(/projects/transfers/[0-9a-f]{32})")))timer_allow="GET, HEAD, DELETE, OPTIONS";
+        else if(request.path=="/projects/explorer")timer_allow="GET, HEAD, OPTIONS";
         else if(request.path=="/projects")timer_allow="GET, HEAD, POST, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/projects/[^/]+)")))timer_allow="GET, HEAD, PATCH, DELETE, OPTIONS";
         if(request.path=="/files/explorer")timer_allow="GET, HEAD, OPTIONS";
@@ -287,6 +291,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     configure_configs(server,std::make_shared<ConfigStore>(DatabaseConfig::from_environment()),auth);
     configure_daily_tasks(server, std::move(tasks), auth);
     configure_boards(server, std::make_shared<BoardStore>(DatabaseConfig::from_environment()), files, auth);
+    configure_project_transfers(server, files, auth);
     configure_projects(server, std::make_shared<ProjectStore>(DatabaseConfig::from_environment()), files, auth);
     configure_files(server, std::move(files), auth);
     // Unknown body routes must not fall back to buffering an unbounded request.

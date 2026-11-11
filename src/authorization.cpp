@@ -76,6 +76,9 @@ const std::vector<RoutePolicy>& route_policies(){
         add("POST","/projects",{"projects.write","files.write"});add("PATCH","/projects/{id}",{"projects.write"});
         // Deletion cascades into all descendant boards/tasks, even when files are retained.
         add("DELETE","/projects/{id}",{"projects.write","boards.write"});
+        add("POST","/projects/{id}/export",{"projects.read","boards.read","files.read","files.write"});
+        for(auto route: {"/projects/imports","/projects/transfers/{id}/apply"})add("POST",route,{"projects.read","projects.write","boards.read","boards.write","files.read","files.write"});
+        for(auto method: {"GET","DELETE"})add(method,"/projects/transfers/{id}",{"projects.read","boards.read","files.read","files.write"});
         add("GET","/project/{id}/files",{"projects.read","files.read"});
         for(auto path:{"/projects/{id}/boards","/projects/{id}/boards/{board}","/projects/{id}/boards/{board}/tasks/{task}"})add("GET",path,{"boards.read"});
         for(auto path:{"/projects/{id}/boards","/projects/{id}/boards/{board}/columns","/projects/{id}/boards/{board}/columns/{column}/tasks"})add("POST",path,{"boards.write"});

@@ -1436,3 +1436,53 @@ std::optional<json> FileStore::leased_file(const std::string& hash) const {
     Connection c(config_);Statement q(c,"SELECT "+file_projection+" FROM files WHERE state='ready' AND EXISTS(SELECT 1 FROM file_leases WHERE file_leases.file_id=files.id AND file_leases.content_revision=files.content_revision AND token_hash=? AND expires_at>UTC_TIMESTAMP())",{hash});q.execute();auto rows=q.rows();return rows.empty()?std::nullopt:std::optional<json>(rows[0]);
 }
 }
+
+#include "project_transfer.hpp"
+namespace spark {
+namespace {
+json transfer_snapshot(Connection& c,const std::string& drive){
+ json result;
+ result["projects"]=board_rows(c,"SELECT "+project_projection+" FROM projects WHERE drive_id=? ORDER BY created_at,id",{drive});
+ result["boards"]=board_rows(c,"SELECT "+board_projection+" FROM project_boards WHERE project_id IN (SELECT id FROM projects WHERE drive_id=?) ORDER BY created_at,id",{drive});
+ result["columns"]=board_rows(c,"SELECT "+column_projection+" FROM project_columns WHERE board_id IN (SELECT id FROM project_boards WHERE project_id IN (SELECT id FROM projects WHERE drive_id=?)) ORDER BY created_at,id",{drive});
+ result["tasks"]=board_rows(c,"SELECT "+task_projection+" FROM project_tasks WHERE board_id IN (SELECT id FROM project_boards WHERE project_id IN (SELECT id FROM projects WHERE drive_id=?)) ORDER BY created_at,id",{drive});
+ result["files"]=board_rows(c,"SELECT "+file_projection+" FROM files WHERE drive_id=? AND state='ready' ORDER BY created_at,id",{drive});
+ result["directories"]=board_rows(c,"SELECT JSON_QUOTE(path) FROM file_directories WHERE drive_id=? ORDER BY path",{drive});return result;
+}
+}
+json ProjectTransferStore::snapshot(const std::string& drive)const{Connection c(config_);Transaction tx(c);auto value=transfer_snapshot(c,drive);tx.commit();return value;}
+void ProjectTransferStore::apply(const std::string& drive,const json& expected,const json& operations,const json& directories)const{
+ Connection c(config_);Transaction tx(c);
+ if(transfer_snapshot(c,drive)!=expected)throw std::invalid_argument("import_target_changed");
+ for(const auto& directory:directories)ensure_directories(c,directory.get<std::string>(),drive);
+ std::set<std::string> boards,created_boards;
+ for(const auto& op:operations){const auto kind=op.at("kind").get<std::string>(),id=op.at("id").get<std::string>();const auto& d=op.at("data");bool create=op.at("create");
+ auto run=[&](const std::string& sql,Parameters p){Statement q(c,sql,std::move(p));q.execute();};
+ if(kind=="projects"){
+  const auto parent=d.at("parent_id").is_null()?std::nullopt:std::optional<std::string>(d.at("parent_id").get<std::string>());
+  const auto github=d.at("github_url").is_null()?std::nullopt:std::optional<std::string>(d.at("github_url").get<std::string>());
+  project_conflict(c,d["name"],d["directory"],id,d["parent_id"],drive);
+  if(create)run("INSERT INTO projects(id,drive_id,parent_id,name,description,github_url,directory) VALUES (?,?,?,?,?,?,?)",{id,drive,parent,d["name"].get<std::string>(),d["description"].get<std::string>(),github,d["directory"].get<std::string>()});
+  else run("UPDATE projects SET name=?,description=?,github_url=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{d["name"].get<std::string>(),d["description"].get<std::string>(),github,id});
+  append_event(c,create?"project.created":"project.updated","/projects/"+id,nullptr,json::object());if(create)touch_project(c,d["parent_id"]);
+ }else if(kind=="boards"){
+  if(create)run("INSERT INTO project_boards(id,project_id,name) VALUES (?,?,?)",{id,d["project_id"].get<std::string>(),d["name"].get<std::string>()});
+  else run("UPDATE project_boards SET name=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{d["name"].get<std::string>(),id});
+  boards.insert(id);if(create)created_boards.insert(id);
+ }else if(kind=="columns"){
+  if(create)run("INSERT INTO project_columns(id,board_id,name) VALUES (?,?,?)",{id,d["board_id"].get<std::string>(),d["name"].get<std::string>()});
+  else run("UPDATE project_columns SET name=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{d["name"].get<std::string>(),id});boards.insert(d["board_id"]);
+ }else if(kind=="tasks"){
+  if(create)run("INSERT INTO project_tasks(id,board_id,column_id,name,description,severity) VALUES (?,?,?,?,?,?)",{id,d["board_id"].get<std::string>(),d["column_id"].get<std::string>(),d["name"].get<std::string>(),d["description"].get<std::string>(),d["severity"].get<std::string>()});
+  else run("UPDATE project_tasks SET column_id=?,name=?,description=?,severity=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{d["column_id"].get<std::string>(),d["name"].get<std::string>(),d["description"].get<std::string>(),d["severity"].get<std::string>(),id});boards.insert(d["board_id"]);
+ }else if(kind=="files"){
+  ensure_directories(c,d["directory"],drive);
+  if(create)run("INSERT INTO files(id,drive_id,directory,name,content_revision,size_bytes,state) VALUES (?,?,?,?,?,?,'ready')",{id,drive,d["directory"].get<std::string>(),d["name"].get<std::string>(),d["content_revision"].get<std::string>(),std::to_string(d["size_bytes"].get<uint64_t>())});
+  else run("UPDATE files SET content_revision=?,size_bytes=? WHERE id=? AND state='ready'",{d["content_revision"].get<std::string>(),std::to_string(d["size_bytes"].get<uint64_t>()),id});
+  append_event(c,create?"file.created":"file.updated","/files/"+id,nullptr,json::object());
+ }
+ }
+ for(const auto& id:boards){Statement q(c,"UPDATE project_boards SET updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{id});q.execute();auto b=board_rows(c,"SELECT "+board_projection+" FROM project_boards WHERE id=?",{id});touch_project(c,b[0]["project_id"]);append_event(c,created_boards.count(id)?"board.created":"board.updated","/projects/"+b[0]["project_id"].get<std::string>()+"/boards/"+id,nullptr,created_boards.count(id)?full_board(c,b[0]):json{{"kind","board"},{"id",id},{"action","updated"}});}
+ tx.commit();
+}
+}

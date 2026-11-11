@@ -41,6 +41,7 @@ ctest --test-dir build --output-on-failure --verbose || {
     mariadb --no-defaults --socket="$test_dir/mysql.sock" --user=root spark_test_local -e "SET time_zone='+00:00'; SELECT CURRENT_TIMESTAMP(6),pulse.* FROM pulse; SELECT event_id,type,resource FROM events ORDER BY event_id DESC LIMIT 10;"
     exit 1
 }
+python3 ./scripts/test-project-transfers.py
 python3 ./scripts/test-commands.py
 SPARK_TEST_TLS=0 python3 ./scripts/test-authentication.py
 if [ -n "${SPARK_TEST_NGINX:-}" ]; then
