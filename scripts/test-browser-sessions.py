@@ -168,6 +168,11 @@ async def exercise_firefox(profile,admin,root):
             assert await evaluate("document.getElementById('token').value===''")
             await evaluate("window.confirm=()=>true;Array.from(document.querySelectorAll('#records article')).find(a=>a.querySelector('strong').textContent==='firefox-watch').querySelector('button').click();true")
             await wait("Array.from(document.querySelectorAll('#records article')).some(a=>a.querySelector('strong').textContent==='firefox-watch' && a.textContent.includes('Revoked'))")
+            assert await evaluate("!$('active-records').textContent.includes('firefox-watch') && $('revoked-records').textContent.includes('firefox-watch')")
+            await evaluate("window.confirm=()=>false;Array.from(document.querySelectorAll('#revoked-records article')).find(a=>a.querySelector('strong').textContent==='firefox-watch').querySelector('button').click();true")
+            assert await evaluate("$('revoked-records').textContent.includes('firefox-watch')")
+            await evaluate("window.confirm=()=>true;Array.from(document.querySelectorAll('#revoked-records article')).find(a=>a.querySelector('strong').textContent==='firefox-watch').querySelector('button').click();true")
+            await wait("!$('records').textContent.includes('firefox-watch') && $('status').textContent==='Revoked credential deleted.'")
             await navigate('/files/explorer')
             # Actual modal creates a file, XHR uploads another, and text editing saves.
             await wait("!document.getElementById('file-create').disabled")
@@ -236,6 +241,16 @@ async def exercise_firefox(profile,admin,root):
             await wait("document.querySelectorAll('#rows article').length===0")
             await navigate('/projects/explorer');await wait("!!window.sparkSession")
             assert await evaluate("sparkSession.ready.then(s=>s.subject)")=='owner'
+            await evaluate("(async()=>{const p=await api('/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Browser severity',description:''})});const b=await api('/projects/'+p.id+'/boards',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Work'})});await api('/projects/'+p.id+'/boards/'+b.id+'/columns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Todo'})});location.hash=p.id;return true;})()")
+            await wait("boardData?.columns.length===1 && !boardLoading && !loading")
+            await evaluate("boardEdit('task-new',boardData.columns[0]);true")
+            assert await evaluate("$('board-severity').value==='Normal' && $('board-severity').options.length===6")
+            await evaluate("$('board-name').value='Severity task';$('board-description').value='Test';$('board-severity').value='Urgent';$('board-form').requestSubmit();true")
+            await wait("!busy && !boardLoading && boardData.columns[0].tasks[0]?.severity==='Urgent'")
+            assert await evaluate("$('boards').textContent.includes('Severity: Urgent')")
+            await evaluate("boardEdit('task-edit',boardData.columns[0].tasks[0]);$('board-severity').value='Very Low';$('board-form').requestSubmit();true")
+            await wait("!busy && !boardLoading && boardData.columns[0].tasks[0]?.severity==='Very Low'")
+            assert await evaluate("$('boards').textContent.includes('Severity: Very Low')")
             await navigate('/commands/explorer');await wait("document.getElementById('devices').textContent.includes('browser-executor')")
             await evaluate("document.querySelector('#devices button').click();document.getElementById('form').requestSubmit();true")
             await wait("document.getElementById('runs').textContent.includes('queued')")
@@ -309,9 +324,23 @@ try:
             call('POST','/admin/credentials',limited,payload,403)
             call('POST','/admin/credentials',limited,{'subject':'limited-device','permissions':['discovery.read']},201)
             browser_call('DELETE','/admin/credentials/'+admin_record['id'],cookie,csrf,status=404)
+            browser_call('DELETE','/admin/credentials/'+minted['id']+'/record',cookie,csrf,status=409)
+            browser_call('DELETE','/admin/credentials/'+admin_record['id']+'/record',cookie,csrf,status=404)
             browser_call('DELETE','/admin/credentials/'+minted['id'],cookie,status=403)
             browser_call('DELETE','/admin/credentials/'+minted['id'],cookie,csrf,status=204)
             browser_call('DELETE','/admin/credentials/'+minted['id'],cookie,csrf,status=204)
+            removal='/admin/credentials/'+minted['id']+'/record'
+            browser_call('DELETE',removal,cookie,status=403)
+            browser_call('DELETE',removal,vc,vp['csrf_token'],status=403)
+            browser_call('DELETE',removal,cookie,csrf,status=403,extra={'Origin':'https://evil.example'})
+            call('DELETE',removal,minted['token'],status=401)
+            survivor=browser_call('POST','/admin/credentials',cookie,csrf,payload,201)[0]
+            browser_call('DELETE',removal,cookie,csrf,status=204)
+            browser_call('DELETE',removal,cookie,csrf,status=404)
+            assert all(r['id']!=minted['id'] for r in browser_call('GET','/admin/credentials',cookie)[0]['credentials'])
+            call('GET','/health',minted['token'],status=401)
+            call('GET','/health',survivor['token'])
+
             call('GET','/health',minted['token'],status=401)
             # A browser never creates a fake device: command requester comes from identity.
             command=browser_call('POST','/commands',cookie,csrf,{'action':'browser.status','idempotency_key':'browser'},202)[0]

@@ -1089,7 +1089,7 @@ namespace spark {
 namespace {
 const std::string board_projection="JSON_OBJECT('id',CONVERT(id USING utf8mb4),'project_id',CONVERT(project_id USING utf8mb4),'name',CONVERT(name USING utf8mb4),'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
 const std::string column_projection="JSON_OBJECT('id',CONVERT(id USING utf8mb4),'board_id',CONVERT(board_id USING utf8mb4),'name',CONVERT(name USING utf8mb4),'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
-const std::string task_projection="JSON_OBJECT('id',CONVERT(id USING utf8mb4),'board_id',CONVERT(board_id USING utf8mb4),'column_id',CONVERT(column_id USING utf8mb4),'name',name,'description',description,'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+const std::string task_projection="JSON_OBJECT('id',CONVERT(id USING utf8mb4),'board_id',CONVERT(board_id USING utf8mb4),'column_id',CONVERT(column_id USING utf8mb4),'name',name,'description',description,'severity',severity,'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
 json board_rows(Connection& c,const std::string& sql,Parameters parameters={}){Statement q(c,sql,std::move(parameters));q.execute();return q.rows();}
 json required_board_row(Connection& c,const std::string& sql,Parameters parameters,const char* error){auto rows=board_rows(c,sql,std::move(parameters));if(rows.empty())throw std::invalid_argument(error);return rows[0];}
 json full_board(Connection& c,json board){
@@ -1136,7 +1136,7 @@ json BoardStore::execute(const std::string& project,const std::string& board_id,
         if(kind=="task")required_board_row(c,"SELECT JSON_QUOTE(id) FROM project_columns WHERE id=? AND board_id=?",{packet["column_id"].get<std::string>(),board_id},"column_not_found");
         else board_conflict(c,table,"board_id",board_id,packet["name"],"");
         id=board_rows(c,"SELECT JSON_QUOTE(UUID())")[0].get<std::string>();
-        if(kind=="task"){Statement q(c,"INSERT INTO project_tasks(id,board_id,column_id,name,description) VALUES (?,?,?,?,?)",{id,board_id,packet["column_id"].get<std::string>(),packet["name"].get<std::string>(),packet["description"].get<std::string>()});q.execute();}
+        if(kind=="task"){Statement q(c,"INSERT INTO project_tasks(id,board_id,column_id,name,description,severity) VALUES (?,?,?,?,?,?)",{id,board_id,packet["column_id"].get<std::string>(),packet["name"].get<std::string>(),packet["description"].get<std::string>(),packet.value("severity",std::string("Normal"))});q.execute();}
         else{Statement q(c,"INSERT INTO project_columns(id,board_id,name) VALUES (?,?,?)",{id,board_id,packet["name"].get<std::string>()});q.execute();}
     }else{
         if(kind=="board"){record=board;id=board_id;}
@@ -1149,7 +1149,7 @@ json BoardStore::execute(const std::string& project,const std::string& board_id,
             auto desired=record;for(const auto& field:packet.items())desired[field.key()]=field.value();changed=desired!=record;
             if(kind=="task"){
                 required_board_row(c,"SELECT JSON_QUOTE(id) FROM project_columns WHERE id=? AND board_id=?",{desired["column_id"].get<std::string>(),board_id},"column_not_found");
-                if(changed){Statement q(c,"UPDATE project_tasks SET name=?,description=?,column_id=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{desired["name"].get<std::string>(),desired["description"].get<std::string>(),desired["column_id"].get<std::string>(),id});q.execute();}
+                if(changed){Statement q(c,"UPDATE project_tasks SET name=?,description=?,column_id=?,severity=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{desired["name"].get<std::string>(),desired["description"].get<std::string>(),desired["column_id"].get<std::string>(),desired["severity"].get<std::string>(),id});q.execute();}
             }else{
                 board_conflict(c,table,kind=="board"?"project_id":"board_id",kind=="board"?project:board_id,desired["name"],id);
                 if(changed){Statement q(c,"UPDATE "+table+" SET name=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{desired["name"].get<std::string>(),id});q.execute();}

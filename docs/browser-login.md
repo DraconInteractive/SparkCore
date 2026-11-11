@@ -120,3 +120,25 @@ The login checkbox “Remember this device” sends optional `remember_device: t
 to `POST /auth/login`. It disables the 30-minute idle timeout for that session,
 while retaining the 12-hour absolute expiry. Omitted or false keeps the idle
 timeout. Sessions remain in memory and do not survive a full server restart.
+
+
+## Removing revoked device credentials
+
+`/admin/credentials/explorer` groups device credentials into **Active** and
+**Revoked** sections, each showing a count and an empty state. Active credentials
+have **Revoke**; revoked credentials have **Delete permanently**, with confirmation.
+There is no automatic cleanup.
+
+The existing `DELETE /admin/credentials/{id}` continues to revoke a device token.
+`DELETE /admin/credentials/{id}/record` permanently removes an already-revoked
+device credential and returns 204. An active credential returns 409
+`credential_not_revoked`; an unknown or administrator credential returns 404
+`credential_not_found`. No body or query parameters are accepted. An administrator
+with `admin.credentials` is required; browser sessions also require the normal
+Origin and CSRF checks.
+
+Deletion checks revocation and removes the record under the credential-store lock,
+using the existing atomic file replacement. It frees a credential slot without
+restoring token access, changing the device registry, or affecting other tokens
+for the same device. Credential backups still contain historical records; restoring
+an older backup can restore old credential state. No database migration is needed.

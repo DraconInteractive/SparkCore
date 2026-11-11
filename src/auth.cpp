@@ -147,5 +147,13 @@ void revoke_credential(const std::filesystem::path& file,const std::string& id){
     for(auto& record:document["credentials"])if(record["id"]==id){record["revoked"]=true;found=true;}
     require(found,"Credential not found");save(file,document);
 }
+CredentialRemoval delete_revoked_device_credential(const std::filesystem::path& file,const std::string& id){
+    Lock lock(file);auto document=load(file);auto& records=document["credentials"];
+    for(auto it=records.begin();it!=records.end();++it)if((*it)["id"]==id&&(*it)["kind"]=="device"){
+        if(!(*it)["revoked"].get<bool>())return CredentialRemoval::active;
+        records.erase(it);save(file,document);return CredentialRemoval::removed;
+    }
+    return CredentialRemoval::not_found;
+}
 json list_credentials(const std::filesystem::path& file){auto records=load(file)["credentials"];for(auto& record:records)record.erase("token_sha256");return records;}
 }

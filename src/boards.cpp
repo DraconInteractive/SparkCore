@@ -19,10 +19,11 @@ void configure_boards(httplib::Server& server,std::shared_ptr<BoardStore> store,
             if(req.method=="POST" || req.method=="PATCH"){
                 const auto type=req.get_header_value("Content-Type");if(type.substr(0,type.find(';'))!="application/json"){bad(415,"unsupported_media_type");return;}
                 packet=json::parse(req.body,nullptr,false);if(!packet.is_object()){bad(400,"invalid_packet");return;}
-                for(const auto& field:packet.items())if(field.key()!="name" && !(kind=="task" && field.key()=="description") && !(kind=="task" && req.method=="PATCH" && field.key()=="column_id")){bad(400,"unknown_field");return;}
+                for(const auto& field:packet.items())if(field.key()!="name" && !(kind=="task" && (field.key()=="description" || field.key()=="severity")) && !(kind=="task" && req.method=="PATCH" && field.key()=="column_id")){bad(400,"unknown_field");return;}
                 if(packet.empty() || (req.method=="POST" && (!packet.contains("name") || (kind=="task" && !packet.contains("description"))))){bad(400,"missing_fields");return;}
                 if(packet.contains("name") && !text(packet["name"],200,true)){bad(400,"invalid_name");return;}
                 if(packet.contains("description") && !text(packet["description"],4000,false)){bad(400,"invalid_description");return;}
+                if(packet.contains("severity") && (!packet["severity"].is_string() || !std::set<std::string>{"Very Low","Low","Normal","High","Very High","Urgent"}.count(packet["severity"].get<std::string>()))){bad(400,"invalid_severity");return;}
                 if(packet.contains("column_id") && (!packet["column_id"].is_string() || !uuid(packet["column_id"].get<std::string>()))){bad(400,"invalid_column_id");return;}
                 if(column_tasks)packet["column_id"]=id;
             }else if(!req.body.empty()){bad(400,"unexpected_body");return;}
@@ -50,13 +51,13 @@ void configure_boards(httplib::Server& server,std::shared_ptr<BoardStore> store,
 }
 json board_endpoints(){
     const std::string base="/projects/{project_id}/boards",detail=base+"/{board_id}";
-    const json task={{"id","task-uuid"},{"board_id","board-uuid"},{"column_id","column-uuid"},{"name","Build mobile client"},{"description","Implement timer view"},{"created_at","2026-09-22T00:00:00.000000Z"},{"updated_at","2026-09-22T00:00:00.000000Z"}};
+    const json task={{"id","task-uuid"},{"board_id","board-uuid"},{"column_id","column-uuid"},{"name","Build mobile client"},{"description","Implement timer view"},{"severity","Normal"},{"created_at","2026-09-22T00:00:00.000000Z"},{"updated_at","2026-09-22T00:00:00.000000Z"}};
     const json column={{"id","column-uuid"},{"board_id","board-uuid"},{"name","To do"},{"created_at","2026-09-22T00:00:00.000000Z"},{"updated_at","2026-09-22T00:00:00.000000Z"}};
     const json board={{"id","board-uuid"},{"project_id","project-uuid"},{"name","Development"},{"created_at","2026-09-22T00:00:00.000000Z"},{"updated_at","2026-09-22T00:00:00.000000Z"}};
     auto full=board;auto col=column;col["tasks"]=json::array({task});full["columns"]=json::array({col});
     json result=json::array();
     auto add=[&](const std::string& method,const std::string& path,const std::string& description,const json& input,const json& output){
-        result.push_back({{"method",method},{"path",path},{"description",description},{"input",{{"path",{{"project_id","owning project UUID; subprojects have independent boards"},{"board_id","board UUID where present"},{"column_id","column UUID where present"},{"task_id","task UUID where present"}}},{"query",json::object()},{"headers",input.is_null()?json::object():json{{"Content-Type","application/json"}}},{"body",input},{"validation","Names: nonblank, max 200 UTF-8 bytes. Task descriptions: string, max 4000 UTF-8 bytes, required on creation (empty allowed). UUIDs are lowercase. Unknown fields/query parameters rejected. PATCH requires at least one editable field. Board names unique per project; column names unique per board (case-sensitive)."}}},{"output",{{"status",method=="POST"?201:method=="DELETE"?204:200},{"body",output}}},{"errors",{{"400","invalid_id, invalid_parameters, invalid_packet, missing_fields, unknown_field, invalid_name, invalid_description, invalid_column_id, unexpected_body"},{"404","project_not_found, board_not_found, column_not_found, task_not_found; IDs must belong to the enclosing project/board"},{"409","name_conflict, column_not_empty"},{"415","unsupported_media_type"},{"503","database_unavailable"}}}});
+        result.push_back({{"method",method},{"path",path},{"description",description},{"input",{{"path",{{"project_id","owning project UUID; subprojects have independent boards"},{"board_id","board UUID where present"},{"column_id","column UUID where present"},{"task_id","task UUID where present"}}},{"query",json::object()},{"headers",input.is_null()?json::object():json{{"Content-Type","application/json"}}},{"body",input},{"validation","Names: nonblank, max 200 UTF-8 bytes. Task descriptions: string, max 4000 UTF-8 bytes, required on creation (empty allowed). Task severity is optional on creation (default Normal); allowed case-sensitive strings: Very Low, Low, Normal, High, Very High, Urgent. Omitted severity on PATCH is retained. UUIDs are lowercase. Unknown fields/query parameters rejected. PATCH requires at least one editable field. Board names unique per project; column names unique per board (case-sensitive)."}}},{"output",{{"status",method=="POST"?201:method=="DELETE"?204:200},{"body",output}}},{"errors",{{"400","invalid_id, invalid_parameters, invalid_packet, missing_fields, unknown_field, invalid_name, invalid_description, invalid_severity, invalid_column_id, unexpected_body"},{"404","project_not_found, board_not_found, column_not_found, task_not_found; IDs must belong to the enclosing project/board"},{"409","name_conflict, column_not_empty"},{"415","unsupported_media_type"},{"503","database_unavailable"}}}});
     };
     add("GET",base,"List all board summaries belonging directly to this project, ordered by creation time then ID. No pagination.",nullptr,{{"boards",json::array({board})}});
     auto empty=board;empty["columns"]=json::array();
@@ -69,7 +70,7 @@ json board_endpoints(){
     add("DELETE",detail+"/columns/{column_id}","Delete an EMPTY column; 409 column_not_empty if tasks remain. Move or delete them first. Emits board.updated.",nullptr,nullptr);
     add("POST",detail+"/columns/{column_id}/tasks","Create a task in the column; emits board.updated.",{{"name","Build mobile client"},{"description","Implement timer view"}},task);
     add("GET",detail+"/tasks/{task_id}","Read a single task.",nullptr,task);
-    add("PATCH",detail+"/tasks/{task_id}","Edit name/description and/or move by setting column_id. Destination must be on this board. Omitted fields retained; identity preserved. Emits board.updated if changed.",{{"column_id","destination-column-uuid"}},task);
+    add("PATCH",detail+"/tasks/{task_id}","Edit name, description, severity and/or move by setting column_id. Destination must be on this board. Omitted fields retained; identity preserved. Emits board.updated if changed.",{{"column_id","destination-column-uuid"}},task);
     add("DELETE",detail+"/tasks/{task_id}","Delete task; emits board.updated.",nullptr,nullptr);
     return result;
 }

@@ -32,9 +32,10 @@ export SPARK_FILE_DIR="$test_dir/files"
 unset SPARK_TEST_AUDIT_FAILURE
 {
     printf 'CREATE DATABASE spark_test_local; USE spark_test_local;\n'
-    cat sql/001_devices.sql sql/002_timers.sql sql/003_notifications.sql sql/004_pulse.sql sql/005_pulse_subscriptions.sql sql/006_calendar.sql sql/007_daily_tasks.sql sql/008_calendar_recurrence.sql sql/009_files.sql sql/010_file_directories.sql sql/011_projects.sql sql/012_project_hierarchy.sql sql/013_project_boards.sql sql/014_file_revisions.sql sql/015_commands.sql sql/016_storage_drives.sql sql/017_runtime_drives.sql sql/018_drive_directories.sql sql/019_command_administrators.sql sql/020_event_calendars.sql sql/021_calendar_sync.sql sql/022_configs.sql sql/023_file_leases.sql
+    cat sql/001_devices.sql sql/002_timers.sql sql/003_notifications.sql sql/004_pulse.sql sql/005_pulse_subscriptions.sql sql/006_calendar.sql sql/007_daily_tasks.sql sql/008_calendar_recurrence.sql sql/009_files.sql sql/010_file_directories.sql sql/011_projects.sql sql/012_project_hierarchy.sql sql/013_project_boards.sql sql/014_file_revisions.sql sql/015_commands.sql sql/016_storage_drives.sql sql/017_runtime_drives.sql sql/018_drive_directories.sql sql/019_command_administrators.sql sql/020_event_calendars.sql sql/021_calendar_sync.sql sql/022_configs.sql sql/023_file_leases.sql sql/024_board_task_severity.sql
 } | mariadb --no-defaults --socket="$test_dir/mysql.sock" --user=root
 python3 ./scripts/test-calendar-migration.py
+python3 ./scripts/test-board-severity-migration.py
 python3 ./scripts/test-db-provisioning.py
 ctest --test-dir build --output-on-failure --verbose || {
     mariadb --no-defaults --socket="$test_dir/mysql.sock" --user=root spark_test_local -e "SET time_zone='+00:00'; SELECT CURRENT_TIMESTAMP(6),pulse.* FROM pulse; SELECT event_id,type,resource FROM events ORDER BY event_id DESC LIMIT 10;"
@@ -80,6 +81,10 @@ echo 'Daily task persistence verified across MariaDB restart.'
 count=$(mariadb --no-defaults --socket="$test_dir/mysql.sock" --user=root --batch --skip-column-names spark_test_local -e "SELECT COUNT(*) FROM calendar_events WHERE name='Reminder' AND last_reminder_occurs_at IS NOT NULL;")
 [ "$count" -eq 1 ] || { echo 'Reminder marker did not survive database restart' >&2; exit 1; }
 echo 'Calendar reminder state verified across MariaDB restart.'
+
+count=$(mariadb --no-defaults --socket="$test_dir/mysql.sock" --user=root --batch --skip-column-names spark_test_local -e "SELECT COUNT(*) FROM project_tasks WHERE name='Persistent task' AND severity='High';")
+[ "$count" -eq 1 ] || { echo 'Board task severity did not survive database restart' >&2; exit 1; }
+echo 'Board task severity persisted across MariaDB restart.'
 
 ./build/file_tests --verify-restart
 echo "File metadata and downloads verified across MariaDB restart."

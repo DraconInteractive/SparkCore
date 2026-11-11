@@ -25,8 +25,16 @@ int main(){
         rejects([&]{issue_credential(file,"device","bad",{"files.*"});});
         auto admin=issue_credential(file,"administrator","owner",{"admin.restart"});auto administrator=provider.authenticate(admin["token"]);check(administrator&&permitted(*administrator,"admin.restart")&&!permitted(*administrator,"files.read")&&!acts_as(*administrator,"watch-1"));
         auto delegated=issue_credential(file,"administrator","delegate",{"devices.delegate","devices.write"});check(acts_as(*provider.authenticate(delegated["token"]),"watch-1"));
+        check(delete_revoked_device_credential(file,issued["id"])==CredentialRemoval::active);
+        check(delete_revoked_device_credential(file,admin["id"])==CredentialRemoval::not_found);
         revoke_credential(file,issued["id"]);check(!provider.authenticate(token)&&!provider.current(*who));check(provider.authenticate(admin["token"]).has_value());
         revoke_credential(file,issued["id"]);rejects([&]{revoke_credential(file,"absent");});
+        revoke_credential(file,delegated["id"]);check(delete_revoked_device_credential(file,delegated["id"])==CredentialRemoval::not_found);
+        check(delete_revoked_device_credential(file,issued["id"])==CredentialRemoval::removed);
+        check(delete_revoked_device_credential(file,issued["id"])==CredentialRemoval::not_found);
+        check(!provider.authenticate(token)&&!provider.current(*who));
+        check(provider.authenticate(admin["token"]).has_value());
+        for(const auto& record:list_credentials(file))check(record["id"]!=issued["id"]);
         auto invalid=document;invalid["credentials"][0]["extra"]="secret";rejects([&]{validate_credentials(invalid);});
         invalid=document;invalid["credentials"].push_back(invalid["credentials"][0]);rejects([&]{validate_credentials(invalid);});
         invalid=document;invalid["credentials"][0]["revoked"]=0;rejects([&]{validate_credentials(invalid);});

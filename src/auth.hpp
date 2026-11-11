@@ -45,5 +45,7 @@ void initialize_credentials(const std::filesystem::path&);
 nlohmann::json issue_credential(const std::filesystem::path&, const std::string& kind,
                                const std::string& subject, const std::set<std::string>& permissions);
 void revoke_credential(const std::filesystem::path&, const std::string& id);
+enum class CredentialRemoval { removed, not_found, active };
+CredentialRemoval delete_revoked_device_credential(const std::filesystem::path&, const std::string& id);
 nlohmann::json list_credentials(const std::filesystem::path&);
 }

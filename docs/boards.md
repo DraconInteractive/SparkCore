@@ -115,3 +115,31 @@ Stop SPARK, run `./scripts/setup-db.sh` to apply `013_project_boards.sql` and gr
 then restart `./build/spark_server`. Existing projects are preserved and initially
 have no boards. API version 1.19.0; server version 0.17.0. Run
 `./scripts/test-local-db.sh` for integration and restart persistence checks.
+
+
+## Task severity
+
+Every board task includes a `severity` string. The six case-sensitive values,
+from lowest to highest, are **Very Low**, **Low**, **Normal**, **High**,
+**Very High**, and **Urgent**. Creation defaults to **Normal** when omitted;
+existing tasks migrate to **Normal**. An omitted field on PATCH is retained.
+Unknown strings, nulls and non-string values return 400 `invalid_severity`.
+
+Set severity when creating a task through
+`POST /projects/{project_id}/boards/{board_id}/columns/{column_id}/tasks`, or
+change it through `PATCH /projects/{project_id}/boards/{board_id}/tasks/{task_id}`:
+
+```json
+{"severity":"Urgent"}
+```
+
+Severity can be changed with name, description and/or column in the same atomic
+update. Single-task reads and full board reads include it. Changes emit the
+existing `board.updated` notification; identical edits emit nothing. Existing
+`boards.read` and `boards.write` permissions apply. Severity does not reorder
+cards or affect daily tasks.
+
+The project explorer shows severity on each task card and a selector when
+creating or editing a task. Run `./scripts/setup-db.sh` to apply migration
+`024_board_task_severity.sql` before restarting the rebuilt server. Rerunning the
+migration preserves severities already set. Database backups include the field.

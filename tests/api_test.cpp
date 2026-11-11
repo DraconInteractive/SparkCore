@@ -43,7 +43,7 @@ int main() {
         check(document["client_setup"]["tcp"]["authenticated_resume_hello"]["after_sequence"]==42,"authenticated resume example");
         check(document["client_setup"]["tcp"]["wire_example"].get<std::string>().back()=='\n',"hello wire newline");
         check(!document["notifications"]["hello"].contains("token"),"open active hello stays open");
-        check(document["endpoints"].size() == 133, "endpoint count");
+        check(document["endpoints"].size() == 134, "endpoint count");
         for (const auto& endpoint : document["endpoints"]) {
             if(endpoint["path"].get<std::string>().rfind("/configs",0)==0 || endpoint["path"].get<std::string>().rfind("/calendar-sync",0)==0 || endpoint.contains("access") || endpoint["path"].get<std::string>().rfind("/backups",0)==0 || endpoint["path"].get<std::string>().rfind("/connections",0)==0)continue;
             if (endpoint["path"].get<std::string>().find("/commands") == 0 || endpoint["path"] == "/devices/{id}/actions" || endpoint["path"] == "/" || endpoint["path"].get<std::string>().find("/admin/") == 0 || endpoint["path"] == "/project/{id}/files" || endpoint["path"].get<std::string>().find("/projects") == 0 || endpoint["path"].get<std::string>().find("/files") == 0 || endpoint["path"] == "/api/docs" || endpoint["path"].get<std::string>().find("/daily-tasks") == 0 || endpoint["path"].get<std::string>().find("/events") == 0 || endpoint["method"] != "GET" || endpoint["path"] == "/pulse" || endpoint["path"].get<std::string>().find("/timers") == 0 || endpoint["path"] == "/devices/{id}") continue;

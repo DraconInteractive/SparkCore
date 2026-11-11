@@ -9,12 +9,28 @@ constexpr auto page=R"HTML(<!doctype html><html lang="en"><meta charset="utf-8">
 <main><a href="/">← Dashboard</a><h1>Device access</h1><p>Create a separate token for each device. The device uses it for REST requests and TCP notifications.</p><p id="status" role="status"></p>
 <section><h2>Provision a device</h2><form id="create"><label>Device ID<input id="subject" type="text" required maxlength="64" pattern="[A-Za-z0-9_\-]+" placeholder="watch-1"></label><p>Use the same ID when registering the device and opening its notification connection. This does not register the device automatically.</p><h3>Permissions</h3><p>Discovery reads the API guide; devices.write lets the device register itself; notifications.read enables notifications for the resource permissions you choose. Resource access applies across this instance.</p><div id="permissions"></div><button id="issue" disabled>Create token</button></form></section>
 <section id="secret" hidden><h2>Save this token now</h2><p>It will not be shown again. Transfer it securely to your device. No token is saved in browser storage.</p><textarea id="token" readonly aria-label="New device token"></textarea><button id="copy">Copy token</button><button id="dismiss">I have saved it</button></section>
-<section><h2>Device credentials</h2><p>To replace a token, create a new one for the same device, update the device, then revoke the old credential.</p><div id="records"></div></section></main>
+<section><h2>Device credentials</h2><p>To replace a token, create a new one for the same device, update the device, then revoke the old credential.</p><div id="records"><section><h3 id="active-heading">Active</h3><div id="active-records"></div></section><section><h3 id="revoked-heading">Revoked</h3><p>Revoked tokens no longer work. Delete their records to remove them permanently from this list.</p><div id="revoked-records"></div></section></div></section></main>
 <script src="/auth/client.js"></script><script>
 const $=id=>document.getElementById(id);let pending=false;
 const descriptions={'discovery.read':'Read API documentation and server status','devices.write':'Register and update this device','devices.read':'Read device details','devices.delegate':'Act on behalf of other devices (advanced)','notifications.read':'Receive notifications for permitted resources','events.read':'Read calendar events','events.write':'Create, change and delete calendar events','timers.read':'Read timers','timers.write':'Create, stop and confirm timers','tasks.read':'Read daily tasks','tasks.write':'Manage and check daily tasks','files.read':'Browse and download files','files.write':'Upload, edit and delete files','projects.read':'Read projects','projects.write':'Manage projects','boards.read':'Read project boards','boards.write':'Manage boards and their tasks','pulse.read':'Read pulse state','pulse.write':'Change pulse settings and subscriptions','commands.read':'Read commands','commands.invoke':'Request commands','commands.advertise':'Advertise this device’s commands','commands.execute':'Claim and execute commands'};
 async function api(path,options){const r=await fetch(path,options);const p=r.status===204?null:await r.json();if(!r.ok)throw Error(p.error);return p;}
-async function refresh(){const p=await api('/admin/credentials');$('permissions').replaceChildren();for(const name of p.permissions){const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.value=name;input.checked=['discovery.read','devices.write','notifications.read'].includes(name);label.title=name;label.append(input,document.createTextNode(' '+(descriptions[name]||name)));$('permissions').append(label);}$('records').replaceChildren();for(const record of p.credentials){const item=document.createElement('article'),title=document.createElement('strong'),details=document.createElement('p');title.textContent=record.subject;details.textContent=record.id+' · '+(record.revoked?'Revoked':'Active')+' · '+record.permissions.join(', ');item.append(title,details);if(!record.revoked){const revoke=document.createElement('button');revoke.textContent='Revoke';revoke.onclick=async()=>{if(!confirm('Revoke this credential for '+record.subject+'? Its token will stop working.'))return;revoke.disabled=true;try{await api('/admin/credentials/'+record.id,{method:'DELETE'});await refresh();}catch(e){$('status').textContent=e.message;revoke.disabled=false;}};item.append(revoke);}$('records').append(item);}$('issue').disabled=false;}
+async function refresh(){
+ const p=await api('/admin/credentials');$('permissions').replaceChildren();
+ for(const name of p.permissions){const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.value=name;input.checked=['discovery.read','devices.write','notifications.read'].includes(name);label.title=name;label.append(input,document.createTextNode(' '+(descriptions[name]||name)));$('permissions').append(label);}
+ for(const [revoked,prefix] of [[false,'active'],[true,'revoked']]){
+  const container=$(prefix+'-records'),records=p.credentials.filter(r=>r.revoked===revoked);container.replaceChildren();$(prefix+'-heading').textContent=(revoked?'Revoked':'Active')+' ('+records.length+')';
+  if(!records.length){const empty=document.createElement('p');empty.textContent=revoked?'No revoked credentials.':'No active credentials.';container.append(empty);}
+  for(const record of records){
+   const item=document.createElement('article'),title=document.createElement('strong'),details=document.createElement('p'),action=document.createElement('button');title.textContent=record.subject;details.textContent=record.id+' · '+(revoked?'Revoked':'Active')+' · '+record.permissions.join(', ');item.append(title,details);
+   action.type='button';action.textContent=revoked?'Delete permanently':'Revoke';
+   action.onclick=async()=>{
+    if(!confirm(revoked?'Permanently delete this revoked credential for '+record.subject+'? This cannot be undone.':'Revoke this credential for '+record.subject+'? Its token will stop working.'))return;
+    action.disabled=true;try{await api('/admin/credentials/'+record.id+(revoked?'/record':''),{method:'DELETE'});await refresh();$('status').textContent=revoked?'Revoked credential deleted.':'Credential revoked.';}catch(e){$('status').textContent=e.message;action.disabled=false;}
+   };item.append(action);container.append(item);
+  }
+ }
+ $('issue').disabled=pending||!$('secret').hidden;
+}
 $('create').onsubmit=async e=>{e.preventDefault();if(pending||!$('secret').hidden)return;pending=true;$('issue').disabled=true;$('status').textContent='';try{const permissions=Array.from($('permissions').querySelectorAll('input:checked'),i=>i.value);const p=await api('/admin/credentials',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({subject:$('subject').value,permissions})});$('token').value=p.token;$('secret').hidden=false;$('secret').scrollIntoView();await refresh();}catch(e){$('status').textContent=e.message;}finally{pending=false;$('issue').disabled=!$('secret').hidden;}};
 $('copy').onclick=async()=>{try{await navigator.clipboard.writeText($('token').value);$('status').textContent='Token copied.';}catch(e){$('status').textContent='Select the token and copy it manually.';}};$('dismiss').onclick=()=>{$('token').value='';$('secret').hidden=true;$('issue').disabled=false;};window.addEventListener('pagehide',()=>{$('token').value='';});refresh().catch(e=>{$('status').textContent=e.message;});
 </script></html>)HTML";
@@ -47,6 +63,13 @@ void configure_credentials(httplib::Server& server,std::shared_ptr<Authorization
                 }
                 auto result=issue_credential(file,"device",subject,permissions);res.status=201;res.set_content(result.dump(),"application/json");return;
             }
+            if(req.path.size()>7&&req.path.compare(req.path.size()-7,7,"/record")==0){
+                if(!req.params.empty()||!req.body.empty()){error(res,400,"invalid_request");return;}
+                const auto result=delete_revoked_device_credential(file,req.matches[1].str());
+                if(result==CredentialRemoval::not_found){error(res,404,"credential_not_found");return;}
+                if(result==CredentialRemoval::active){error(res,409,"credential_not_revoked");return;}
+                res.status=204;return;
+            }
             auto id=req.matches[1].str();bool found=false;
             for(const auto& record:list_credentials(file))if(record["id"]==id&&record["kind"]=="device")found=true;
             if(!found){error(res,404,"credential_not_found");return;}
@@ -56,18 +79,20 @@ void configure_credentials(httplib::Server& server,std::shared_ptr<Authorization
     server.Get("/admin/credentials/explorer",handle);server.Get("/admin/credentials",handle);
     body_route(server,"POST","/admin/credentials",handle,auth);
     body_route(server,"DELETE",R"(/admin/credentials/([^/]+))",handle,auth);
+    body_route(server,"DELETE",R"(/admin/credentials/([^/]+)/record)",handle,auth);
 }
 nlohmann::json credential_endpoints(){
     auto out=json::array();
     auto add=[&](const char* method,const char* path,const char* description,json input,int status,json output){
         out.push_back({{"method",method},{"path",path},{"description",description},{"input",{{"body",input}}},{"output",{{"status",status},{"body",output}}}});
     };
-    add("GET","/admin/credentials/explorer","Administrator device-token management page. Token mode and admin.credentials required.",nullptr,200,"HTML device credential manager");
+    add("GET","/admin/credentials/explorer","Administrator device-token management page with Active and Revoked sections; revoked device credentials can be permanently deleted. Token mode and admin.credentials required.",nullptr,200,"HTML device credential manager");
     add("GET","/admin/credentials","List device credentials without secrets or hashes, and device permissions this administrator may grant. Token mode and administrator identity required.",nullptr,200,
         json::parse(R"({"credentials":[{"id":"<credential-id>","kind":"device","subject":"watch-1","permissions":["discovery.read"],"revoked":false}],"permissions":["discovery.read","devices.write","notifications.read"]})"));
     add("POST","/admin/credentials","Issue a device token; plaintext returned once. subject is device ID (1..64 ASCII letters, digits, _ and -). Nonempty unique permissions must be held by administrator; admin.* cannot be granted. Does not register device. Browser sessions require Origin and X-SPARK-CSRF.",
         json::parse(R"({"subject":"watch-1","permissions":["discovery.read","devices.write","events.read","notifications.read"]})"),201,{{"id","<credential-id>"},{"token","<one-time-device-token>"}});
     add("DELETE","/admin/credentials/{id}","Revoke device credential by credential ID, not device ID; repeated revocation succeeds. Unknown/non-device ID returns 404. Browser sessions require Origin and X-SPARK-CSRF.",nullptr,204,nullptr);
+    add("DELETE","/admin/credentials/{id}/record","Permanently delete an already-revoked device credential. Administrator identity and admin.credentials required; browser sessions require exact Origin and X-SPARK-CSRF. Active credentials return 409 credential_not_revoked; unknown or administrator credentials return 404 credential_not_found. No request body or query parameters (400 invalid_request). Deletion does not restore access, delete the device registry entry or revoke other tokens for the device. Credential-store failures return 503 credential_store_unavailable.",nullptr,204,nullptr);
     return out;
 }
 }

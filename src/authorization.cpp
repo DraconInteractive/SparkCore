@@ -44,6 +44,7 @@ const std::vector<RoutePolicy>& route_policies(){
         for(auto path:{"/admin/credentials","/admin/credentials/explorer"})add("GET",path,{"admin.credentials"});
         add("POST","/admin/credentials",{"admin.credentials"});
         add("DELETE","/admin/credentials/{id}",{"admin.credentials"});
+        add("DELETE","/admin/credentials/{id}/record",{"admin.credentials"});
         add("GET","/admin/status",{"admin.restart","admin.backup"});
         add("GET","/admin/backup-locations",{"admin.backup"});
         add("POST","/admin/restart",{"admin.restart"});add("POST","/admin/backup",{"admin.backup"});

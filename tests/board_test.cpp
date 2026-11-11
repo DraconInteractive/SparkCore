@@ -38,12 +38,25 @@ int main(){
     auto todo=post(path+"/columns",{{"name","To do"}}),done=post(path+"/columns",{{"name","Done"}}),foreign=post(path2+"/columns",{{"name","Done"}});
     auto task=post(path+"/columns/"+todo["id"].get<std::string>()+"/tasks",{{"name","Implement <client> 🌳"},{"description","Long description\nNext line"}});
     const auto tp=path+"/tasks/"+task["id"].get<std::string>();
+    check(task["severity"]=="Normal","default task severity");
+    for(const auto* severity:{"Very Low","Low","Normal","High","Very High","Urgent"}){
+        auto updated=expect(client.Patch(tp,json{{"severity",severity}}.dump(),"application/json"),200);
+        check(updated["severity"]==severity,"severity update");
+        auto events=db.count("SELECT COUNT(*) FROM events WHERE type='board.updated'");
+        check(expect(client.Patch(tp,json{{"severity",severity}}.dump(),"application/json"),200)==updated && db.count("SELECT COUNT(*) FROM events WHERE type='board.updated'")==events,"severity no-op");
+    }
+    task=expect(client.Get(tp),200);
+    for(const auto& severity:json::array({nullptr,42,"urgent","Critical",""})){
+        expect(client.Patch(tp,json{{"severity",severity}}.dump(),"application/json"),400,"invalid_severity");
+        expect(client.Post(path+"/columns/"+todo["id"].get<std::string>()+"/tasks",json{{"name","Invalid"},{"description",""},{"severity",severity}}.dump(),"application/json"),400,"invalid_severity");
+    }
+
     check(expect(client.Get(path),200)["columns"][0]["tasks"][0]==task,"full board task detail");
     expect(client.Delete(path+"/columns/"+todo["id"].get<std::string>()),409,"column_not_empty");
     expect(client.Patch(tp,json{{"column_id",foreign["id"]}}.dump(),"application/json"),404,"column_not_found");
     expect(client.Get(path2+"/tasks/"+task["id"].get<std::string>()),404,"task_not_found");
     auto moved=expect(client.Patch(tp,json{{"column_id",done["id"]},{"description","Moved"}}.dump(),"application/json"),200);
-    check(moved["id"]==task["id"]&&moved["column_id"]==done["id"]&&moved["name"]==task["name"],"move preserves identity and omitted fields");
+    check(moved["id"]==task["id"]&&moved["column_id"]==done["id"]&&moved["name"]==task["name"]&&moved["severity"]=="Urgent","move preserves identity and omitted fields");
     const auto count=db.count("SELECT COUNT(*) FROM events WHERE type='board.updated'");
     check(expect(client.Patch(tp,json{{"column_id",done["id"]}}.dump(),"application/json"),200)==moved && db.count("SELECT COUNT(*) FROM events WHERE type='board.updated'")==count,"idempotent move emits no event");
     expect(client.Delete(path+"/columns/"+todo["id"].get<std::string>()),204);
@@ -59,7 +72,7 @@ int main(){
     check(client.Options(path)->get_header_value("Allow")=="GET, HEAD, PATCH, DELETE, OPTIONS","board OPTIONS");
     expect(client.Post(path,"{}","application/json"),405,"method_not_allowed");
     db.run("CREATE TRIGGER reject_board_event BEFORE INSERT ON events FOR EACH ROW BEGIN IF NEW.type LIKE 'board.%' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='test board rollback'; END IF; END");
-    expect(client.Patch(tp,R"({"name":"Should rollback"})","application/json"),503,"database_unavailable");
+    expect(client.Patch(tp,R"({"name":"Should rollback","severity":"Low"})","application/json"),503,"database_unavailable");
     check(expect(client.Get(tp),200)==moved,"task rollback with notification failure");
     expect(client.Delete(path),503,"database_unavailable");
     check(expect(client.Get(path),200)["columns"][0]["tasks"].size()==1,"board cascade rollback");
@@ -86,7 +99,7 @@ int main(){
     check(created&&updated&&deleted,"board changes use notification frames");
     auto root=expect(client.Get("/projects?parent_id=null"),200)["projects"][0];auto persistent=post("/projects/"+root["id"].get<std::string>()+"/boards",{{"name","Persistent board"}});
     auto persistent_path="/projects/"+root["id"].get<std::string>()+"/boards/"+persistent["id"].get<std::string>();
-    auto pc=post(persistent_path+"/columns",{{"name","Todo"}});post(persistent_path+"/columns/"+pc["id"].get<std::string>()+"/tasks",{{"name","Persistent task"},{"description","Survives restart"}});
+    auto pc=post(persistent_path+"/columns",{{"name","Todo"}});post(persistent_path+"/columns/"+pc["id"].get<std::string>()+"/tasks",{{"name","Persistent task"},{"description","Survives restart"},{"severity","High"}});
     std::cout<<"Boards, columns, task moves, ownership, deletion, rollback, concurrency and notifications passed\n";
  }catch(const std::exception& e){std::cerr<<e.what()<<'\n';result=1;}
  server.stop();worker.join();return result;
