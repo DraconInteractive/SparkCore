@@ -98,6 +98,19 @@ with tempfile.TemporaryDirectory(prefix='spark-config-') as temporary:
         check({**remote,'server':{**remote['server'],'tls_notification_port':port}},2)
     check({'server':remote['server']},2)
     check({**remote,'auth':packet['auth']},2)
+    private=root/'google-private';private.mkdir(mode=0o700)
+    google_client=private/'client.json'
+    google_client.write_text(json.dumps({'web':{'client_id':'test.apps.googleusercontent.com','client_secret':secret,'redirect_uris':['https://spark.example/auth/google/callback']}}));google_client.chmod(0o600)
+    google_auth={**packet['auth'],'browser_origin':'https://spark.example','google':{'client_credentials_file':str(google_client),'owner_file':str(private/'owner.json')}}
+    assert check({'auth':google_auth})['google_login_configured']
+    assert not (private/'owner.json').exists()
+    check({'auth':{**google_auth,'browser_origin':''}},2)
+    check({'auth':{**google_auth,'google':{**google_auth['google'],'unexpected':True}}},2)
+    google_client.chmod(0o644);check({'auth':google_auth},2);google_client.chmod(0o600)
+    private.chmod(0o755);check({'auth':google_auth},2);private.chmod(0o700)
+    check({'auth':{**google_auth,'google':{**google_auth['google'],'owner_file':str(google_client)}}},2)
+    google_client.write_text(json.dumps({'web':{'client_id':'test.apps.googleusercontent.com','client_secret':secret,'redirect_uris':['https://wrong.example/auth/google/callback']}}))
+    check({'auth':google_auth},2)
     summary=check(packet)
     assert summary['auth_mode']=='required' and summary['runtime_supported']
     assert summary['startup_blockers']==[]

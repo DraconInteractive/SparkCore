@@ -1,5 +1,6 @@
 #pragma once
 #include "auth.hpp"
+#include "google_auth.hpp"
 #include "browser_sessions.hpp"
 #include <httplib.h>
 #include <memory>
@@ -17,7 +18,8 @@ const std::vector<RoutePolicy>& route_policies();
 bool notification_permitted(const Identity&, const nlohmann::json& event);
 class Authorization {
 public:
-    explicit Authorization(std::shared_ptr<IdentityProvider> provider,std::string browser_origin={}) : provider_(std::move(provider)), sessions_(std::make_shared<BrowserSessions>(provider_,std::move(browser_origin))) {}
+    explicit Authorization(std::shared_ptr<IdentityProvider> provider,std::string browser_origin={},std::optional<GoogleConfig> google=std::nullopt) : provider_(std::move(provider)), sessions_(std::make_shared<BrowserSessions>(provider_,browser_origin)) {if(google)google_=std::make_shared<GoogleAuth>(*google,browser_origin,sessions_);}
+    std::shared_ptr<GoogleAuth> google()const{return google_;}
     std::shared_ptr<BrowserSessions> sessions()const{return sessions_;}
     std::optional<Identity> identity(const httplib::Request& req,httplib::Response& res)const{return resolve(req,res);}
     bool request(const httplib::Request&, httplib::Response&) const;
@@ -25,6 +27,7 @@ public:
     std::shared_ptr<IdentityProvider> provider() const {return provider_;}
 private:
     std::optional<Identity> resolve(const httplib::Request&, httplib::Response&) const;
+    std::shared_ptr<GoogleAuth> google_;
     std::shared_ptr<IdentityProvider> provider_;
     std::shared_ptr<BrowserSessions> sessions_;
 };

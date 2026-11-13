@@ -114,7 +114,7 @@ int main(int argc, char** argv) {
         }
         config.require_supported_runtime();
         config.apply_environment();
-        if(config.auth)auth=std::make_shared<spark::Authorization>(std::make_shared<spark::TokenIdentityProvider>(config.auth->credentials_file),config.auth->browser_origin);
+        if(config.auth)auth=std::make_shared<spark::Authorization>(std::make_shared<spark::TokenIdentityProvider>(config.auth->credentials_file),config.auth->browser_origin,config.auth->google);
     } catch (const std::exception& error) {
         if(dynamic_cast<const spark::ConfigError*>(&error))spark::log_event("error","config","Configuration error",{{"reason",error.what()}});
         else spark::log_exception("error","config","Configuration or credential validation failed",error);

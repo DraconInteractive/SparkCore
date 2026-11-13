@@ -42,6 +42,9 @@ const std::vector<RoutePolicy>& route_policies(){
         add("POST","/connections",{"admin.connections"});add("PATCH","/connections/{id}",{"admin.connections"});add("DELETE","/connections/{id}",{"admin.connections"});add("POST","/connections/{id}/test",{"admin.connections"});
         for(auto path:{"/","/health","/version","/api","/api/docs"})add("GET",path,{"discovery.read"});
         for(auto path:{"/admin/credentials","/admin/credentials/explorer"})add("GET",path,{"admin.credentials"});
+        for(auto path:{"/admin/google","/admin/google/explorer"})add("GET",path,{"admin.credentials"});
+        for(auto path:{"/admin/google/enroll","/admin/google/sessions/revoke"})add("POST",path,{"admin.credentials"});
+        add("DELETE","/admin/google/owner",{"admin.credentials"});
         add("POST","/admin/credentials",{"admin.credentials"});
         add("DELETE","/admin/credentials/{id}",{"admin.credentials"});
         add("DELETE","/admin/credentials/{id}/record",{"admin.credentials"});

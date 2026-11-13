@@ -2,6 +2,7 @@
 #include "auth.hpp"
 #include <httplib.h>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -16,9 +17,13 @@ public:
     void login(const httplib::Request&,httplib::Response&);
     void session(const httplib::Request&,httplib::Response&);
     void logout(const httplib::Request&,httplib::Response&);
+    void establish(const httplib::Request&,httplib::Response&,const Identity&,bool remember,std::function<bool(const Identity&)> current={});
+    std::string binding(const httplib::Request&)const;
+    void invalidate(const std::string&);
+    bool active(const std::string&,const Identity&);
     bool enabled()const{return !origin_.empty();}
 private:
-    struct Session {Identity identity;std::string csrf;Clock::time_point created,seen;bool remember_device=false;};
+    struct Session {Identity identity;std::string csrf;Clock::time_point created,seen;bool remember_device=false;std::function<bool(const Identity&)> current;};
     std::shared_ptr<IdentityProvider> provider_;
     std::string origin_;
     std::chrono::seconds idle_,lifetime_;

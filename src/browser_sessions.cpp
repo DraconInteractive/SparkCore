@@ -51,7 +51,7 @@ std::optional<Identity> BrowserSessions::resolve(const httplib::Request& req,htt
     const bool mutation=req.method!="GET"&&req.method!="HEAD";
     if(!origin_ok(req,mutation)){reply(res,403,{{"error","browser_origin_mismatch"}});return {};}
     auto id=cookie(req);std::lock_guard<std::mutex> lock(mutex_);prune();auto it=sessions_.find(id);
-    if(it==sessions_.end()||!provider_->current(it->second.identity)){
+    if(it==sessions_.end()||!(it->second.current?it->second.current(it->second.identity):provider_->current(it->second.identity))){
         if(it!=sessions_.end())sessions_.erase(it);clear(res);reply(res,401,{{"error","unauthorized"}});return {};
     }
     if(mutation&&(req.get_header_value_count("X-SPARK-CSRF")!=1||!equal(req.get_header_value("X-SPARK-CSRF"),it->second.csrf))){reply(res,403,{{"error","csrf_failed"}});return {};}
@@ -66,13 +66,23 @@ void BrowserSessions::login(const httplib::Request& req,httplib::Response& res){
     if(!packet.is_object()||packet.size()!=(packet.contains("remember_device")?2u:1u)||!packet.contains("token")||!packet["token"].is_string()||(packet.contains("remember_device")&&!packet["remember_device"].is_boolean())){reply(res,400,{{"error","invalid_packet"}});return;}
     auto who=provider_->authenticate(packet["token"].get<std::string>());
     if(!who||who->kind!="administrator"){reply(res,401,{{"error","invalid_login"}});return;}
+    establish(req,res,*who,packet.value("remember_device",false));
+}
+std::string BrowserSessions::binding(const httplib::Request& req)const{return cookie(req);}
+void BrowserSessions::invalidate(const std::string& id){std::lock_guard<std::mutex> lock(mutex_);sessions_.erase(id);}
+bool BrowserSessions::active(const std::string& id,const Identity& expected){
+    std::lock_guard<std::mutex> lock(mutex_);prune();auto it=sessions_.find(id);if(it==sessions_.end())return false;const auto& s=it->second;
+    return s.identity.credential_id==expected.credential_id&&s.identity.permissions==expected.permissions&&(s.current?s.current(s.identity):provider_->current(s.identity));
+}
+void BrowserSessions::establish(const httplib::Request& req,httplib::Response& res,const Identity& who,bool remember,std::function<bool(const Identity&)> current){
     auto id=random_secret(),csrf=random_secret();std::lock_guard<std::mutex> lock(mutex_);prune();
     auto old=cookie(req);if(!old.empty())sessions_.erase(old);
     if(sessions_.size()>=256){reply(res,429,{{"error","session_limit"}});return;}
-    auto now=Clock::now();sessions_.emplace(id,Session{*who,csrf,now,now,packet.value("remember_device",false)});
+    auto now=Clock::now();sessions_.emplace(id,Session{who,csrf,now,now,remember,std::move(current)});
     res.set_header("Set-Cookie",std::string(session_cookie)+"="+id+"; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age="+std::to_string(lifetime_.count()));
-    reply(res,200,{{"mode","session"},{"subject",who->subject},{"permissions",who->permissions},{"csrf_token",csrf},{"expires_in_seconds",lifetime_.count()}});
+    reply(res,200,{{"mode","session"},{"subject",who.subject},{"permissions",who.permissions},{"csrf_token",csrf},{"expires_in_seconds",lifetime_.count()}});
 }
+
 void BrowserSessions::session(const httplib::Request& req,httplib::Response& res){
     auto who=resolve(req,res,false);if(!who)return;
     std::lock_guard<std::mutex> lock(mutex_);auto it=sessions_.find(cookie(req));if(it==sessions_.end()){reply(res,401,{{"error","unauthorized"}});return;}

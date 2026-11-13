@@ -1,5 +1,6 @@
 #pragma once
 #include "database.hpp"
+#include "google_auth.hpp"
 #include <filesystem>
 #include <optional>
 #include <vector>
@@ -13,6 +14,7 @@ struct AuthConfig {
     std::string provider;
     std::filesystem::path credentials_file;
     std::string browser_origin;
+    std::optional<GoogleConfig> google;
 };
 struct ServerConfig {
     std::string host = "0.0.0.0";

@@ -103,14 +103,21 @@ ServerConfig ServerConfig::load(int argc,char** argv) {
         for(std::size_t j=0;j<i;++j)require(!ancestor(result.drives[i],result.drives[j])&&!ancestor(result.drives[j],result.drives[i]),"Storage drives must not duplicate or contain one another");
     }
     if(root.contains("auth")){
-        const auto& auth=root["auth"];keys(auth,{"provider","credentials_file","browser_origin"},"auth");
+        const auto& auth=root["auth"];keys(auth,{"provider","credentials_file","browser_origin","google"},"auth");
         require(auth.contains("provider")&&auth.contains("credentials_file"),"auth requires provider and credentials_file");
         auto provider=string_field(auth,"provider",{},"auth.provider");require(provider=="tokens","Unsupported auth provider");
         auto path=path_value(string_field(auth,"credentials_file",{},"auth.credentials_file"),base,"auth.credentials_file");
         validate_credentials(read_json_object(path,"credentials file",true));
         std::string origin;
         if(auth.contains("browser_origin")){origin=string_field(auth,"browser_origin",{},"auth.browser_origin");require(valid_browser_origin(origin),"auth.browser_origin must be a canonical HTTPS origin without path or default port");}
-        result.auth=AuthConfig{provider,path,origin};
+        result.auth=AuthConfig{provider,path,origin,std::nullopt};
+        if(auth.contains("google")){
+            const auto& g=auth["google"];keys(g,{"client_credentials_file","owner_file"},"auth.google");
+            GoogleConfig config{path_value(string_field(g,"client_credentials_file",{},"auth.google.client_credentials_file"),base,"auth.google.client_credentials_file"),path_value(string_field(g,"owner_file",{},"auth.google.owner_file"),base,"auth.google.owner_file")};
+            require(!origin.empty(),"Google login requires auth.browser_origin");
+            require(config.owner_file!=path&&config.owner_file!=config.client_credentials_file,"Google owner_file must be separate from credential files");
+            validate_google_config(config,origin);result.auth->google=config;
+        }
     }
     if(result.remote || result.tls_notification_port){
         require(result.auth.has_value(),"Remote deployment requires token authentication");
@@ -155,6 +162,7 @@ json ServerConfig::summary() const {
     json output={{"configuration_valid",true},{"runtime_supported",blockers.empty()},{"startup_blockers",blockers},
         {"server",{{"host",host},{"port",port},{"notification_port",notification_port}}},
         {"storage",{{"drives",paths}}},{"auth_mode",auth?"required":"open"},{"remote",remote}};
+    if(auth)output["google_login_configured"]=auth->google.has_value();
     if(remote){output["browser_origin"]=auth->browser_origin;output["public_notifications"]=public_notifications();}
     return output;
 }

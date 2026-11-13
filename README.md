@@ -531,3 +531,5 @@ Device JSON configuration: see [Configs](docs/configs.md) for the REST API,
 `/configs/explorer`, permissions, notifications and future optional schemas.
 
 Project ZIP exports, imports and conflict review: [project transfers](docs/project-transfers.md).
+
+Optional VPS owner login with Google: [Google login setup](docs/google-login.md).

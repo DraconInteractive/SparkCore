@@ -260,6 +260,9 @@ async def exercise_firefox(profile,admin,root):
             await evaluate("$('review-apply').click();true")
             await wait("!transferBusy && !$('review-dialog').open")
             assert await evaluate("$('transfer-status').textContent.includes('Import complete')")
+            await navigate('/admin/google/explorer');await wait("document.getElementById('status').textContent.includes('Enrol your account')")
+            assert await evaluate("!document.getElementById('enrol').hidden")
+            assert await evaluate("(async()=>{const r=await fetch('/admin/google/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({remember_device:true})});const p=await r.json();return r.ok&&p.authorization_url.startsWith('https://accounts.google.com/o/oauth2/v2/auth?')&&!document.cookie.includes('__Host-spark_google');})()")
             await navigate('/commands/explorer');await wait("document.getElementById('devices').textContent.includes('browser-executor')")
             await evaluate("document.querySelector('#devices button').click();document.getElementById('form').requestSubmit();true")
             await wait("document.getElementById('runs').textContent.includes('queued')")
@@ -291,7 +294,8 @@ try:
         viewer=issue('administrator','viewer','discovery.read','files.read')['token']
         device=issue('device','browser-executor','devices.write','commands.advertise','commands.execute')['token']
         tls=port();browser_host='localhost:'+str(tls);browser_origin='https://'+browser_host
-        config=root/'instance.json';config.write_text(json.dumps({'server':{'host':'127.0.0.1','port':http,'notification_port':tcp},'storage':{'drives':[str(root/'files')]},'auth':{'provider':'tokens','credentials_file':str(credentials),'browser_origin':browser_origin}}))
+        google_client=root/'google-client.json';google_client.write_text(json.dumps({'web':{'client_id':'fixture.apps.googleusercontent.com','client_secret':'fixture-secret','redirect_uris':[browser_origin+'/auth/google/callback']}}));google_client.chmod(0o600)
+        config=root/'instance.json';config.write_text(json.dumps({'server':{'host':'127.0.0.1','port':http,'notification_port':tcp},'storage':{'drives':[str(root/'files')]},'auth':{'provider':'tokens','credentials_file':str(credentials),'browser_origin':browser_origin,'google':{'client_credentials_file':str(google_client),'owner_file':str(root/'google-owner.json')}}}))
         env=dict(os.environ,SPARK_DB_NAME=database)
         proc=subprocess.Popen(['./build/spark_server','--config',str(config)],env=env,stdout=log,stderr=log)
         proxy=None
@@ -305,6 +309,15 @@ try:
             packet,headers=login(admin);cookie=headers['Set-Cookie'].split(';')[0];csrf=packet['csrf_token']
             assert 'Secure; HttpOnly; SameSite=Strict' in headers['Set-Cookie']
             browser_call('GET','/auth/session',cookie)
+            assert browser_call('GET','/auth/google/options')[0]=={'enabled':False}
+            assert browser_call('GET','/admin/google',cookie)[0]['configured']
+            browser_call('POST','/admin/google/enroll',cookie,body={},status=403)
+            browser_call('POST','/admin/google/enroll',cookie,csrf,{},403,extra={'Origin':'https://evil.example'})
+            flow,flow_headers=browser_call('POST','/admin/google/enroll',cookie,csrf,{})
+            assert flow['authorization_url'].startswith('https://accounts.google.com/o/oauth2/v2/auth?')
+            assert 'Secure; HttpOnly; SameSite=Lax' in flow_headers['Set-Cookie']
+            browser_call('GET','/auth/google/callback?state=invalid&code=invalid',status=400)
+
             browser_call('POST','/files/directories',cookie,body={'directory':'/denied'},status=403)
             browser_call('POST','/files/directories',cookie,csrf,{'directory':'/allowed'})
             browser_call('POST','/files/directories',cookie,csrf,{'directory':'/denied'},403,extra={'Origin':'https://evil.example'})
