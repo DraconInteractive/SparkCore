@@ -1,5 +1,6 @@
 #pragma once
 #include "database.hpp"
+#include "assistant.hpp"
 #include "google_auth.hpp"
 #include <filesystem>
 #include <optional>
@@ -23,6 +24,7 @@ struct ServerConfig {
     DatabaseConfig database;
     std::vector<std::filesystem::path> drives;
     std::optional<AuthConfig> auth;
+    std::optional<AssistantConfig> assistant;
     std::optional<int> tls_notification_port;
     bool remote = false;
     nlohmann::json public_notifications() const;

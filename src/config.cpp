@@ -68,7 +68,7 @@ ServerConfig ServerConfig::load(int argc,char** argv) {
         auto config=fs::absolute(options.at("--config")).lexically_normal();base=config.parent_path();
         root=read_json_object(config,"configuration file");
     }
-    keys(root,{"server","database","storage","auth"},"configuration");
+    keys(root,{"server","database","storage","auth","assistant"},"configuration");
     const auto server=root.value("server",json::object());keys(server,{"host","port","notification_port","tls_notification_port"},"server");
     if(server.contains("tls_notification_port"))result.tls_notification_port=port_json(server["tls_notification_port"],"server.tls_notification_port");
     result.host=string_field(server,"host",result.host,"server.host");
@@ -119,6 +119,22 @@ ServerConfig ServerConfig::load(int argc,char** argv) {
             validate_google_config(config,origin);result.auth->google=config;
         }
     }
+    if(root.contains("assistant")){
+        const auto& a=root["assistant"];keys(a,{"credentials_file","state_directory","model","reasoning","allow_open_access"},"assistant");
+        AssistantConfig c;
+        if(a.contains("allow_open_access")){
+            require(a["allow_open_access"].is_boolean(),"assistant.allow_open_access must be a boolean");
+            c.allow_open_access=a["allow_open_access"].get<bool>();
+        }
+        require(!result.remote||!c.allow_open_access,"Remote mode forbids assistant.allow_open_access");
+        require(result.auth.has_value()||c.allow_open_access,"Assistant requires token authentication or explicit allow_open_access");
+        c.credentials_file=path_value(string_field(a,"credentials_file",{},"assistant.credentials_file"),base,"assistant.credentials_file");
+        c.state_directory=path_value(string_field(a,"state_directory",{},"assistant.state_directory"),base,"assistant.state_directory");
+        c.model=string_field(a,"model",c.model,"assistant.model");
+        c.reasoning=string_field(a,"reasoning",c.reasoning,"assistant.reasoning");
+        for(const auto& drive:result.drives)require(!ancestor(drive,c.credentials_file)&&!ancestor(drive,c.state_directory),"Assistant private files must be outside shared drives");
+        validate_assistant_config(c);result.assistant=c;
+    }
     if(result.remote || result.tls_notification_port){
         require(result.auth.has_value(),"Remote deployment requires token authentication");
         require(!result.auth->browser_origin.empty(),"Remote deployment requires auth.browser_origin");
@@ -162,6 +178,8 @@ json ServerConfig::summary() const {
     json output={{"configuration_valid",true},{"runtime_supported",blockers.empty()},{"startup_blockers",blockers},
         {"server",{{"host",host},{"port",port},{"notification_port",notification_port}}},
         {"storage",{{"drives",paths}}},{"auth_mode",auth?"required":"open"},{"remote",remote}};
+    output["assistant_enabled"]=assistant.has_value();
+    output["assistant_allow_open_access"]=assistant&&assistant->allow_open_access;
     if(auth)output["google_login_configured"]=auth->google.has_value();
     if(remote){output["browser_origin"]=auth->browser_origin;output["public_notifications"]=public_notifications();}
     return output;

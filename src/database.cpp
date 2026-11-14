@@ -1486,3 +1486,151 @@ void ProjectTransferStore::apply(const std::string& drive,const json& expected,c
  tx.commit();
 }
 }
+
+// Assistant mutations share the same database transaction and event writer as
+// ordinary timer operations. There is no model/network call inside a transaction.
+#include "actions.hpp"
+namespace spark {
+namespace {
+const std::string action_projection="JSON_OBJECT('id',id,'kind',kind,'resource',resource,'before_state',JSON_EXTRACT(before_state,'$'),'after_state',JSON_EXTRACT(after_state,'$'),'undo_state',JSON_EXTRACT(undo_state,'$'),'metadata',JSON_EXTRACT(metadata,'$'),'status',status,'fingerprint',fingerprint,'undo_available',IF(status='completed' AND undo_until>CURRENT_TIMESTAMP(6),TRUE,FALSE),'created_at',DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.%fZ'),'undo_until',DATE_FORMAT(undo_until,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+std::optional<json> read_action(Connection& c,const std::string& id,const std::string& owner,bool lock=false){
+ Statement s(c,"SELECT "+action_projection+" FROM action_history WHERE id=? AND owner=?"+(lock?" FOR UPDATE":""),{id,owner});s.execute();auto rows=s.rows();if(rows.empty())return {};auto j=rows[0];j["undo_available"]=j["undo_available"]==true||j["undo_available"]==1||j["undo_available"]=="true"||j["undo_available"]=="1";return j;
+}
+}
+namespace {
+const std::string confirmation_projection="JSON_OBJECT('id',id,'fingerprint',fingerprint,'conversation_id',conversation_id,'kind',kind,'before_state',JSON_EXTRACT(before_state,'$'),'after_state',JSON_EXTRACT(after_state,'$'),'source_device',source_device,'status',IF(status='pending' AND expires_at<=CURRENT_TIMESTAMP(6),'expired',status),'expires_at',DATE_FORMAT(expires_at,'%Y-%m-%dT%H:%i:%s.%fZ'))";
+std::optional<json> read_confirmation(Connection& c,const std::string& id,const std::string& owner,bool lock=false){
+ Statement q(c,"SELECT "+confirmation_projection+" FROM assistant_confirmations WHERE id=? AND owner=?"+(lock?" FOR UPDATE":""),{id,owner});q.execute();auto rows=q.rows();return rows.empty()?std::nullopt:std::optional<json>(rows[0]);
+}
+bool same_event(const json& a,const json& b){
+ for(auto k:{"id","calendar","name","description","occurs_at","place","recurrence","reminder_minutes","created_at","updated_at"})if(a.at(k)!=b.at(k))return false;return true;
+}
+void write_event_state(Connection& c,const std::string& id,const json& data,const json& reminder){
+ Statement q(c,"UPDATE calendar_events SET name=?,description=?,occurs_at=?,place=?,recurrence=?,reminder_minutes=?,last_reminder_occurs_at=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",
+ {data["name"].get<std::string>(),data["description"].get<std::string>(),sql_datetime(data["occurs_at"]),nullable_string(data["place"]),data["recurrence"].is_null()?std::nullopt:std::optional<std::string>(data["recurrence"].dump()),data["reminder_minutes"].is_null()?std::nullopt:std::optional<std::string>(data["reminder_minutes"].dump()),reminder.is_null()?std::nullopt:std::optional<std::string>(sql_datetime(reminder)),id});q.execute();
+}
+json deletion_sync_metadata(Connection& c,const json& event){
+ Statement q(c,"SELECT JSON_QUOTE(sync_id) FROM calendar_sync_items WHERE event_id=?",{event["id"].get<std::string>()});q.execute();auto rows=q.rows();sync_track(c,event,true);
+ return rows.empty()?json::object():json{{"sync_tombstone",sync_read(c,rows[0])}};
+}
+}
+std::optional<json> ActionStore::event(const std::string& id)const{return CalendarStore(config_).get(id);}
+json ActionStore::find_events(const json& filters)const{return CalendarStore(config_).list(filters);}
+std::optional<json> ActionStore::confirmation(const std::string& id,const std::string& owner)const{Connection c(config_);return read_confirmation(c,id,owner);}
+std::optional<json> ActionStore::latest_confirmation(const std::string& owner,const std::string& conversation)const{
+ Connection c(config_);Statement q(c,"SELECT "+confirmation_projection+" FROM assistant_confirmations WHERE owner=? AND conversation_id=? ORDER BY created_at DESC,id DESC LIMIT 1",{owner,conversation});q.execute();auto rows=q.rows();return rows.empty()?std::nullopt:std::optional<json>(rows[0]);
+}
+std::optional<json> ActionStore::decision(const std::string& request,const std::string& owner,const std::string& fingerprint)const{
+ Connection c(config_);Statement q(c,"SELECT JSON_OBJECT('confirmation_id',confirmation_id,'fingerprint',fingerprint) FROM assistant_confirmation_decisions WHERE id=? AND owner=?",{request,owner});q.execute();auto rows=q.rows();if(rows.empty())return {};if(rows[0]["fingerprint"]!=fingerprint)throw TimerConflict("idempotency_conflict");return read_confirmation(c,rows[0]["confirmation_id"],owner);
+}
+void ActionStore::supersede(const std::string& owner,const std::string& conversation)const{
+ Connection c(config_);Transaction tx(c);sync_lock(c);Statement q(c,"UPDATE assistant_confirmations SET status='superseded' WHERE owner=? AND conversation_id=? AND status='pending'",{owner,conversation});q.execute();tx.commit();
+}
+json ActionStore::propose_event(const std::string& id,const std::string& owner,const std::string& fingerprint,const std::string& conversation,const std::string& event_id,const std::string& kind,const json& changes,const std::string& scope,const json& source,const json& expected)const{
+ if(kind!="calendar.update"&&kind!="calendar.delete")throw TimerConflict("invalid_proposal");
+ Connection c(config_);Transaction tx(c);sync_lock(c);
+ if(auto old=read_confirmation(c,id,owner,true)){if((*old)["fingerprint"]!=fingerprint)throw TimerConflict("idempotency_conflict");tx.commit();return *old;}
+ auto current=read_calendar(c,event_id,true);if(!current)throw TimerConflict("event_not_found");
+ if(!expected.is_null()&&!same_event(*current,expected))throw TimerConflict("event_changed");
+ if(scope=="occurrence"||(!(*current)["recurrence"].is_null()&&scope!="series"))throw TimerConflict("recurrence_scope_required");
+ json after=nullptr;
+ if(kind=="calendar.update"){
+  if(!changes.is_object()||changes.empty())throw TimerConflict("empty_changes");
+  auto data=sync_portable(*current);
+  for(const auto& field:changes.items()){if(!data.contains(field.key()))throw TimerConflict("invalid_edit_field");data[field.key()]=field.value();}
+  data=calendar_sync_data(data);if(data==sync_portable(*current))throw TimerConflict("no_changes");after=*current;after.update(data);
+ }
+ Statement cancel(c,"UPDATE assistant_confirmations SET status='superseded' WHERE owner=? AND conversation_id=? AND status='pending'",{owner,conversation});cancel.execute();
+ Statement insert(c,"INSERT INTO assistant_confirmations(id,owner,fingerprint,conversation_id,kind,before_state,after_state,source_device,expires_at) VALUES(?,?,?,?,?,?,?,?,TIMESTAMPADD(MINUTE,5,CURRENT_TIMESTAMP(6)))",{id,owner,fingerprint,conversation,kind,current->dump(),after.dump(),nullable_string(source)});insert.execute();auto result=*read_confirmation(c,id,owner);tx.commit();return result;
+}
+json ActionStore::decide(const std::string& id,const std::string& owner,bool confirm,const std::string& request,const std::string& fingerprint)const{
+ Connection c(config_);Transaction tx(c);sync_lock(c);
+ if(!request.empty()){
+  Statement q(c,"SELECT JSON_OBJECT('confirmation_id',confirmation_id,'fingerprint',fingerprint,'decision',decision) FROM assistant_confirmation_decisions WHERE id=? AND owner=?",{request,owner});q.execute();auto rows=q.rows();
+  if(!rows.empty()){if(rows[0]["fingerprint"]!=fingerprint)throw TimerConflict("idempotency_conflict");auto result=*read_confirmation(c,rows[0]["confirmation_id"],owner);tx.commit();return result;}
+ }
+ auto proposal=read_confirmation(c,id,owner,true);if(!proposal)throw TimerConflict("confirmation_not_found");
+ if(!confirm&&(*proposal)["status"]=="confirmed")throw TimerConflict("confirmation_already_confirmed");
+ if(!request.empty()){Statement receipt(c,"INSERT INTO assistant_confirmation_decisions(id,owner,fingerprint,confirmation_id,decision) VALUES(?,?,?,?,?)",{request,owner,fingerprint,id,confirm?"confirm":"cancel"});receipt.execute();}
+ auto set_status=[&](const std::string& status){Statement q(c,"UPDATE assistant_confirmations SET status=? WHERE id=?",{status,id});q.execute();};
+ if((*proposal)["status"]=="pending"){
+  if(!confirm)set_status("cancelled");
+  else {
+   auto before=(*proposal)["before_state"];auto event_id=before["id"].get<std::string>();auto current=read_calendar(c,event_id,true);
+   if(!current||!same_event(*current,before))set_status("conflict");
+   else{
+    json after=nullptr,metadata=json::object();
+    if((*proposal)["kind"]=="calendar.delete"){
+     metadata=deletion_sync_metadata(c,*current);Statement remove(c,"DELETE FROM calendar_events WHERE id=?",{event_id});remove.execute();append_event(c,"calendar.deleted","/events/"+event_id,(*proposal)["source_device"],*current);
+    }else{
+     auto next=(*proposal)["after_state"];auto reminder=(next["occurs_at"]!=(*current)["occurs_at"]||next["recurrence"]!=(*current)["recurrence"])?json(nullptr):(*current)["last_reminder_occurs_at"];
+     write_event_state(c,event_id,next,reminder);after=*read_calendar(c,event_id);sync_track(c,after);append_event(c,"calendar.updated","/events/"+event_id,(*proposal)["source_device"],after);
+    }
+    Statement history(c,"INSERT INTO action_history(id,owner,fingerprint,kind,resource,before_state,after_state,metadata,undo_until) VALUES(?,?,?,?,?,?,?,?,TIMESTAMPADD(HOUR,24,CURRENT_TIMESTAMP(6)))",{id,owner,(*proposal)["fingerprint"].get<std::string>(),(*proposal)["kind"].get<std::string>(),"/events/"+event_id,current->dump(),after.dump(),metadata.dump()});history.execute();set_status("confirmed");
+   }
+  }
+ }
+ auto result=*read_confirmation(c,id,owner);tx.commit();return result;
+}
+void ActionStore::verify()const{Connection c(config_);Statement s(c,"SELECT "+action_projection+" FROM action_history LIMIT 0");s.execute();s.rows();Statement p(c,"SELECT "+confirmation_projection+" FROM assistant_confirmations LIMIT 0");p.execute();p.rows();}
+std::optional<json> ActionStore::get(const std::string& id,const std::string& owner)const{Connection c(config_);return read_action(c,id,owner);}
+json ActionStore::timers()const{return TimerStore(config_).active();}
+json ActionStore::create_timer(const std::string& id,const std::string& owner,const std::string& fingerprint,const json& packet)const{
+ if(!packet.is_object()||!packet.contains("duration_seconds")||!packet["duration_seconds"].is_number_integer()||packet["duration_seconds"]<1||packet["duration_seconds"]>604800||!packet.contains("label")||!packet["label"].is_string()||packet["label"].get<std::string>().size()>200)throw TimerConflict("invalid_timer_arguments");
+ Connection c(config_);Transaction tx(c);
+ Statement reserve(c,"INSERT INTO action_history(id,owner,fingerprint,kind,after_state,undo_until) VALUES(?,?,?,'timers.create','{}',TIMESTAMPADD(HOUR,24,CURRENT_TIMESTAMP(6)))",{id,owner,fingerprint});
+ if(!reserve.execute(true)){
+  auto old=read_action(c,id,owner,true);if(!old||(*old)["fingerprint"]!=fingerprint)throw TimerConflict("idempotency_conflict");tx.commit();return *old;
+ }
+ Statement uuid(c,"SELECT JSON_QUOTE(UUID())");uuid.execute();auto timer_id=uuid.rows()[0].get<std::string>();auto duration=std::to_string(packet["duration_seconds"].get<int>());
+ Statement insert(c,"INSERT INTO timers(id,label,duration_seconds,source_device,ends_at) VALUES(?,?,?,?,TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(6)))",{timer_id,packet["label"].get<std::string>(),duration,nullable_string(packet.value("source_device",json(nullptr))),duration});insert.execute();auto timer=*read_timer(c,timer_id);
+ timer_event(c,"timer.created",timer,timer["source_device"]);
+ Statement update(c,"UPDATE action_history SET resource=?,after_state=? WHERE id=?",{"/timers/"+timer_id,timer.dump(),id});update.execute();auto record=*read_action(c,id,owner);tx.commit();return record;
+}
+json ActionStore::occurrences(const json& filters)const{return CalendarStore(config_).list(filters,true);}
+json ActionStore::create_event(const std::string& id,const std::string& owner,const std::string& fingerprint,const json& packet)const{
+ auto data=packet;data.erase("calendar");data.erase("source_device");data=calendar_sync_data(data);
+ if(packet.at("calendar")!="local"&&packet.at("calendar")!="shared")throw std::invalid_argument("invalid_calendar");
+ Connection c(config_);Transaction tx(c);sync_lock(c);
+ Statement reserve(c,"INSERT INTO action_history(id,owner,fingerprint,kind,after_state,undo_until) VALUES(?,?,?,'calendar.create','{}',TIMESTAMPADD(HOUR,24,CURRENT_TIMESTAMP(6)))",{id,owner,fingerprint});
+ if(!reserve.execute(true)){auto old=read_action(c,id,owner,true);if(!old||(*old)["fingerprint"]!=fingerprint)throw TimerConflict("idempotency_conflict");tx.commit();return *old;}
+ auto event_id=sync_uuid(c);
+ Statement insert(c,"INSERT INTO calendar_events(id,name,description,occurs_at,place,recurrence,reminder_minutes,calendar) VALUES (?,?,?,?,?,?,?,?)",
+ {event_id,data["name"].get<std::string>(),data["description"].get<std::string>(),sql_datetime(data["occurs_at"]),nullable_string(data["place"]),data["recurrence"].is_null()?std::nullopt:std::optional<std::string>(data["recurrence"].dump()),data["reminder_minutes"].is_null()?std::nullopt:std::optional<std::string>(data["reminder_minutes"].dump()),packet["calendar"].get<std::string>()});insert.execute();
+ auto event=*read_calendar(c,event_id);sync_track(c,event);append_event(c,"calendar.created","/events/"+event_id,packet.value("source_device",json(nullptr)),event);
+ Statement update(c,"UPDATE action_history SET resource=?,after_state=? WHERE id=?",{"/events/"+event_id,event.dump(),id});update.execute();auto record=*read_action(c,id,owner);tx.commit();return record;
+}
+json ActionStore::undo(const std::string& id,const std::string& owner)const{
+ Connection c(config_);Transaction tx(c);sync_lock(c);auto record=read_action(c,id,owner,true);if(!record)throw TimerConflict("action_not_found");if((*record)["status"]=="undone"){tx.commit();return *record;}
+ if(!(*record)["undo_available"].get<bool>())throw TimerConflict("undo_expired");
+ if((*record)["kind"]=="calendar.update"||(*record)["kind"]=="calendar.delete"){
+  auto original=(*record)["before_state"];auto event_id=original["id"].get<std::string>();auto current=read_calendar(c,event_id,true);json restored;
+  if((*record)["kind"]=="calendar.update"){
+   if(!current||!same_event(*current,(*record)["after_state"]))throw TimerConflict("undo_conflict");
+   auto reminder=(original["occurs_at"]!=(*current)["occurs_at"]||original["recurrence"]!=(*current)["recurrence"])?original["last_reminder_occurs_at"]:(*current)["last_reminder_occurs_at"];
+   write_event_state(c,event_id,original,reminder);restored=*read_calendar(c,event_id);sync_track(c,restored);append_event(c,"calendar.updated","/events/"+event_id,nullptr,restored);
+  }else{
+   if(current)throw TimerConflict("undo_conflict");auto metadata=(*record)["metadata"];
+   if(metadata.contains("sync_tombstone")){auto tombstone=metadata["sync_tombstone"];auto now=sync_read(c,tombstone["sync_id"]);if(now["revision"]!=tombstone["revision"]||!now["data"].is_null())throw TimerConflict("undo_conflict");}
+   Statement restore(c,"INSERT INTO calendar_events(id,name,description,occurs_at,place,recurrence,reminder_minutes,calendar,created_at,last_reminder_occurs_at) VALUES(?,?,?,?,?,?,?,?,?,?)",{event_id,original["name"].get<std::string>(),original["description"].get<std::string>(),sql_datetime(original["occurs_at"]),nullable_string(original["place"]),original["recurrence"].is_null()?std::nullopt:std::optional<std::string>(original["recurrence"].dump()),original["reminder_minutes"].is_null()?std::nullopt:std::optional<std::string>(original["reminder_minutes"].dump()),original["calendar"].get<std::string>(),sql_datetime(original["created_at"]),original["last_reminder_occurs_at"].is_null()?std::nullopt:std::optional<std::string>(sql_datetime(original["last_reminder_occurs_at"]))});restore.execute();restored=*read_calendar(c,event_id);
+   if(metadata.contains("sync_tombstone")&&restored["calendar"]=="shared")sync_write(c,metadata["sync_tombstone"]["sync_id"],event_id,sync_portable(restored));else sync_track(c,restored);
+   append_event(c,"calendar.created","/events/"+event_id,nullptr,restored);
+  }
+  json reversal={{"before",current?*current:json(nullptr)},{"after",restored}};Statement update(c,"UPDATE action_history SET status='undone',undo_state=?,undone_at=CURRENT_TIMESTAMP(6) WHERE id=?",{reversal.dump(),id});update.execute();auto result=*read_action(c,id,owner);tx.commit();return result;
+ }
+ if((*record)["kind"]=="calendar.create"){
+  auto expected=(*record)["after_state"];auto event_id=expected["id"].get<std::string>();auto event=read_calendar(c,event_id,true);
+  if(!event)throw TimerConflict("undo_conflict");
+  for(auto key:{"calendar","name","description","place","occurs_at","recurrence","reminder_minutes","updated_at"})if((*event)[key]!=expected[key])throw TimerConflict("undo_conflict");
+  sync_track(c,*event,true);Statement remove(c,"DELETE FROM calendar_events WHERE id=?",{event_id});remove.execute();append_event(c,"calendar.deleted","/events/"+event_id,nullptr,*event);
+  json reversal={{"before",*event},{"after",nullptr}};Statement update(c,"UPDATE action_history SET status='undone',undo_state=?,undone_at=CURRENT_TIMESTAMP(6) WHERE id=?",{reversal.dump(),id});update.execute();auto result=*read_action(c,id,owner);tx.commit();return result;
+ }
+ if((*record)["kind"]!="timers.create")throw TimerConflict("undo_not_supported");auto expected=(*record)["after_state"];auto timer_id=expected["id"].get<std::string>();auto timer=read_timer(c,timer_id,true);
+ if(!timer||((*timer)["status"]!="running"&&(*timer)["status"]!="expired"))throw TimerConflict("undo_conflict");
+ if((*timer)["status"]=="running"&&(*timer)["updated_at"]!=expected["updated_at"])throw TimerConflict("undo_conflict");
+ for(auto key:{"label","duration_seconds","source_device","created_at","ends_at"})if((*timer)[key]!=expected[key])throw TimerConflict("undo_conflict");
+ Statement overdue(c,"SELECT JSON_ARRAY(status='running' AND ends_at<=CURRENT_TIMESTAMP(6)) FROM timers WHERE id=?",{timer_id});overdue.execute();if(overdue.rows()[0][0]==1){Statement expire(c,"UPDATE timers SET status='expired',updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{timer_id});expire.execute();timer_event(c,"timer.expired",*read_timer(c,timer_id),nullptr);}
+ auto before=*read_timer(c,timer_id);Statement stop(c,"UPDATE timers SET status='stopped',updated_at=CURRENT_TIMESTAMP(6) WHERE id=?",{timer_id});stop.execute();auto stopped=*read_timer(c,timer_id);timer_event(c,"timer.stopped",stopped,nullptr);
+ json reversal={{"before",before},{"after",stopped}};Statement update(c,"UPDATE action_history SET status='undone',undo_state=?,undone_at=CURRENT_TIMESTAMP(6) WHERE id=?",{reversal.dump(),id});update.execute();auto result=*read_action(c,id,owner);tx.commit();return result;
+}
+}

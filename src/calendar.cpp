@@ -51,6 +51,7 @@ bool text_field(const json& value, std::size_t max, bool nonempty = false) {
     return text.size() <= max && (!nonempty || text.find_first_not_of(" \t\r\n") != std::string::npos);
 }
 }
+std::string calendar_normalize_timestamp(const std::string& value) { auto result=timestamp(value);if(!result)throw std::invalid_argument("invalid_datetime");return *result; }
 std::time_t calendar_instant(const std::string& value) {
     std::tm parts{};
     strptime(value.c_str(), "%Y-%m-%dT%H:%M:%S", &parts);

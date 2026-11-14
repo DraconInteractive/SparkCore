@@ -52,6 +52,11 @@ int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Mainten
         startup_check="boards"; spark::BoardStore(spark::DatabaseConfig::from_environment()).verify();
         startup_check="storage"; files->initialize();
         try{maintenance->initialize();}catch(const std::exception& e){spark::log_exception("warning","backup","Backup visibility unavailable",e);}
+        startup_check="assistant";
+        std::shared_ptr<spark::ActionStore> actions;
+        if(config.assistant){actions=std::make_shared<spark::ActionStore>(config.database);actions->verify();}
+        auto assistant=config.assistant?std::make_shared<spark::Assistant>(*config.assistant,spark::Assistant::Transport{},actions):nullptr;
+        spark::configure_assistant(server,assistant,auth);
         spark::configure_api(server, std::move(store), timers, notification_port, pulse, calendar, tasks, files, maintenance, auth, config.public_notifications());
     } catch (const std::exception& error) {
         spark::log_exception("error","server","Startup check failed",error,{{"check",startup_check}});

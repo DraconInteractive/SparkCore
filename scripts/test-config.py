@@ -98,6 +98,23 @@ with tempfile.TemporaryDirectory(prefix='spark-config-') as temporary:
         check({**remote,'server':{**remote['server'],'tls_notification_port':port}},2)
     check({'server':remote['server']},2)
     check({**remote,'auth':packet['auth']},2)
+    assistant_dir=root/'assistant-private';assistant_dir.mkdir(mode=0o700)
+    assistant_key=assistant_dir/'key.json'
+    assistant_key.write_text(json.dumps({'api_key':secret}));assistant_key.chmod(0o600)
+    assistant={'credentials_file':str(assistant_key),'state_directory':str(assistant_dir)}
+    assert check({**packet,'assistant':assistant})['assistant_enabled']
+    check({'assistant':assistant},2)
+    assert check({'assistant':{**assistant,'allow_open_access':True}})['assistant_allow_open_access']
+    check({'assistant':{**assistant,'allow_open_access':False}},2)
+    for invalid in ['true',1,None]:
+        check({**packet,'assistant':{**assistant,'allow_open_access':invalid}},2)
+    check({**remote,'assistant':{**assistant,'allow_open_access':True}},2,extra=['--remote'])
+    check({'assistant':{**assistant,'allow_open_access':True}},2,extra=['--remote'])
+    check({**packet,'assistant':{**assistant,'reasoning':'invalid'}},2)
+    check({**packet,'assistant':{**assistant,'endpoint':'https://evil.example'}},2)
+    check({**packet,'storage':{'drives':[str(assistant_dir)]},'assistant':assistant},2)
+    assistant_key.chmod(0o644);check({**packet,'assistant':assistant},2);assistant_key.chmod(0o600)
+    assistant_dir.chmod(0o755);check({**packet,'assistant':assistant},2);assistant_dir.chmod(0o700)
     private=root/'google-private';private.mkdir(mode=0o700)
     google_client=private/'client.json'
     google_client.write_text(json.dumps({'web':{'client_id':'test.apps.googleusercontent.com','client_secret':secret,'redirect_uris':['https://spark.example/auth/google/callback']}}));google_client.chmod(0o600)

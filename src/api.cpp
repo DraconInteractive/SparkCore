@@ -1,4 +1,5 @@
 #include "project_transfer.hpp"
+#include "assistant.hpp"
 #include "configs.hpp"
 #include "client_setup.hpp"
 #include "api.hpp"
@@ -29,7 +30,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.50.0";
+constexpr auto api_version = "1.54.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -107,6 +108,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
     for (const auto& endpoint : command_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : backup_visibility_endpoints()) discovery["endpoints"].push_back(endpoint);
     for (const auto& endpoint : dashboard_endpoints()) discovery["endpoints"].push_back(endpoint);
+    for(const auto& endpoint:assistant_endpoints())discovery["endpoints"].push_back(endpoint);
     for(const auto& endpoint:google_endpoints())discovery["endpoints"].push_back(endpoint);
     for(const auto& endpoint:browser_endpoints())discovery["endpoints"].push_back(endpoint);
     for(const auto& endpoint:inter_spark_endpoints())discovery["endpoints"].push_back(endpoint);

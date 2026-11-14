@@ -25,6 +25,15 @@ const std::vector<RoutePolicy>& route_policies(){
             auto pattern=std::regex_replace(path,std::regex(R"(\{[^}]+\})"),"([^/]+)");
             out.push_back({method,path,std::move(permissions),std::regex(pattern),own});
         };
+        add("GET","/assistant/actions/{id}",{"assistant.use"});
+        add("POST","/assistant/actions/{id}/undo",{"assistant.use"});
+        add("GET","/assistant/confirmations/{id}",{"assistant.use","events.read","events.write"});
+        add("POST","/assistant/confirmations/{id}/confirm",{"assistant.use","events.read","events.write"});
+        add("POST","/assistant/confirmations/{id}/cancel",{"assistant.use","events.read","events.write"});
+        add("GET","/assistant/setup",{"assistant.use"});
+        add("GET","/assistant",{"assistant.use"});
+        add("POST","/assistant/requests",{"assistant.use"});
+        add("GET","/assistant/requests/{id}",{"assistant.use"});
         for(auto path:{"/backups/new","/backups/progress","/admin/backup-status"})add("GET",path,{"admin.backup"});
         add("POST","/admin/backup-estimate",{"admin.backup"});
         for(auto path:{"/calendar-sync","/calendar-sync/changes","/calendar-sync/items/{id}"})add("GET",path,{"calendar.sync.read"});

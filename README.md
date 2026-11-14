@@ -533,3 +533,5 @@ Device JSON configuration: see [Configs](docs/configs.md) for the REST API,
 Project ZIP exports, imports and conflict review: [project transfers](docs/project-transfers.md).
 
 Optional VPS owner login with Google: [Google login setup](docs/google-login.md).
+
+Optional Luna assistant with conversation follow-ups, timer/calendar tools and `/assistant/setup` integration guide: [setup and client protocol](docs/assistant.md).

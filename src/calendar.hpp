@@ -36,6 +36,7 @@ private:
 nlohmann::json calendar_sync_data(nlohmann::json data);
 // First occurrence at or after the supplied UTC instant. Weekly rules use Perth time.
 std::optional<std::time_t> calendar_occurrence(const nlohmann::json& event, std::time_t from);
+std::string calendar_normalize_timestamp(const std::string& timestamp);
 std::time_t calendar_instant(const std::string& timestamp);
 std::string calendar_timestamp(std::time_t instant);
 class CalendarScheduler {
