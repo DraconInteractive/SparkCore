@@ -1,4 +1,4 @@
-# Assistant (API 1.60.0)
+# Assistant (API 1.61.0)
 
 SPARK uses a C++ OpenAI Responses adapter with `gpt-6-luna`, authenticated queries and durable results. No dashboard agent is needed. Each request supplies instructions and a strict response schema, sets `store:false`, and never sends the SPARK token to OpenAI.
 
@@ -416,3 +416,23 @@ Twenty files are returned per page. Use the existing next-page button, spoken
 continuation or file_page_from API field; continuation preserves names mode and
 requires no model call. Content search and overview remain separate choices.
 No database migration or new permission is required.
+
+## Directory-scoped project file queries (API 1.61.0)
+
+Examples: “List all files in the docs directory of Demo”, “Include subdirectories”,
+“Search Demo's docs/design folder for retries”, and “List only Demo's root files”.
+Both metadata listing and content search/overview accept an exact project-relative
+folder. A specifically named folder defaults to direct files only; explicitly
+request inclusion of subdirectories for recursive results. Whole-project queries
+retain their previous recursive default.
+
+The model tool fields are project_directory (nullable string) and recursive
+(nullable boolean). They are resolved from the query, not extra top-level REST
+request fields. The response echoes file_search.directory (logical absolute path),
+relative_directory and recursive. Saved continuation pages preserve all three
+scope choices and the project/query; asking for a different scope starts a new
+exploration. Paths remain case-sensitive and bound to the project's stored root
+and assigned drive. Absolute paths, parent/dot segments, backslashes and control
+characters are rejected. A trailing slash is normalized. Missing folders return
+project_directory_not_found, distinct from existing folders with zero files, and
+never fall back to the full project. No migration or new permission is required.

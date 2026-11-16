@@ -1592,14 +1592,20 @@ json ActionStore::projects(const std::string& name,const std::string& id)const{
  if(!id.empty()){where=" WHERE id=?";params.push_back(id);}else if(!name.empty()){where=" WHERE LOCATE(LOWER(?),LOWER(CONVERT(name USING utf8mb4)))>0";params.push_back(name);}
  Statement q(c,"SELECT JSON_OBJECT('id',id,'name',CONVERT(name USING utf8mb4),'description',description,'parent_id',parent_id) FROM projects"+where+" ORDER BY name,id LIMIT 101",params);q.execute();auto rows=q.rows();bool more=rows.size()>100;if(more)rows.erase(rows.end()-1);return {{"projects",rows},{"has_more",more}};
 }
-json ActionStore::project_files(const std::string& id,const json& after)const{
+json ActionStore::project_files(const std::string& id,const json& after,const std::string& relative,bool recursive)const{
+ std::string selected=relative;while(!selected.empty()&&selected.back()=='/')selected.pop_back();
+ if(relative.size()>1024||(!relative.empty()&&relative.front()=='/')||relative.find('\\')!=std::string::npos)throw std::invalid_argument("invalid_project_directory");
+ for(unsigned char c:relative)if(c<32||c==127)throw std::invalid_argument("invalid_project_directory");
+ for(size_t start=0;start<selected.size();){auto end=selected.find('/',start);if(end==std::string::npos)end=selected.size();auto part=selected.substr(start,end-start);if(part.empty()||part=="."||part=="..")throw std::invalid_argument("invalid_project_directory");start=end+1;}
  Connection c(config_);Transaction tx(c);
  Statement project(c,"SELECT JSON_OBJECT('directory',CONVERT(directory USING utf8mb4),'drive_id',CONVERT(drive_id USING utf8mb4)) FROM projects WHERE id=?",{id});project.execute();auto projects=project.rows();if(projects.empty())return {{"missing",true}};
- auto directory=projects[0]["directory"].get<std::string>(),prefix=directory+"/";auto drive=projects[0]["drive_id"].get<std::string>();
+ auto directory=projects[0]["directory"].get<std::string>();auto drive=projects[0]["drive_id"].get<std::string>();
+ if(!selected.empty()){directory+="/"+selected;if(directory.size()>1024)throw std::invalid_argument("invalid_project_directory");Statement exists(c,"SELECT JSON_QUOTE(CONVERT(path USING utf8mb4)) FROM file_directories WHERE drive_id=? AND BINARY path=BINARY ?",{drive,directory});exists.execute();if(exists.rows().empty())return {{"directory_missing",true}};}
+ const auto prefix=directory+"/";
  const std::string rank="CASE WHEN LOWER(CONVERT(name USING utf8mb4)) LIKE 'readme%' THEN 0 WHEN LOWER(CONVERT(name USING utf8mb4))='overview.md' THEN 1 ELSE 2 END";
- Parameters params{drive,directory,prefix,prefix};std::string cursor;
+ Parameters params{drive,directory};if(recursive){params.push_back(prefix);params.push_back(prefix);}std::string cursor;
  if(!after.is_null()){if(!after.is_array()||after.size()!=4||!after[0].is_number_integer()||!after[1].is_string()||!after[2].is_string()||!after[3].is_string())throw std::invalid_argument("invalid_file_cursor");cursor=" AND ("+rank+",BINARY directory,BINARY name,id)>(CAST(? AS UNSIGNED),BINARY ?,BINARY ?,?)";params.push_back(std::to_string(after[0].get<int>()));for(int i=1;i<4;++i)params.push_back(after[i].get<std::string>());}
- Statement q(c,"SELECT JSON_SET("+file_projection+",'$.page_rank',"+rank+") FROM files WHERE state='ready' AND drive_id=? AND (BINARY directory=BINARY ? OR LEFT(BINARY directory,OCTET_LENGTH(?))=BINARY ?)"+cursor+" ORDER BY "+rank+",BINARY directory,BINARY name,id LIMIT 201",params);q.execute();auto rows=q.rows();bool more=rows.size()>200;if(more)rows.erase(rows.end()-1);tx.commit();return {{"directory",directory},{"drive_id",drive},{"files",rows},{"has_more",more}};
+ Statement q(c,"SELECT JSON_SET("+file_projection+",'$.page_rank',"+rank+") FROM files WHERE state='ready' AND drive_id=? AND "+(recursive?"(BINARY directory=BINARY ? OR LEFT(BINARY directory,OCTET_LENGTH(?))=BINARY ?)":"BINARY directory=BINARY ?")+cursor+" ORDER BY "+rank+",BINARY directory,BINARY name,id LIMIT 201",params);q.execute();auto rows=q.rows();bool more=rows.size()>200;if(more)rows.erase(rows.end()-1);tx.commit();return {{"directory",directory},{"relative_directory",selected},{"recursive",recursive},{"drive_id",drive},{"files",rows},{"has_more",more}};
 }
 json ActionStore::project_boards(const std::string& id)const{
  Connection c(config_);Transaction tx(c);json boards=json::array();bool more=false;
