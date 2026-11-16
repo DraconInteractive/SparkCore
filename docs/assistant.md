@@ -1,8 +1,8 @@
-# Assistant (API 1.54.0)
+# Assistant (API 1.60.0)
 
 SPARK uses a C++ OpenAI Responses adapter with `gpt-6-luna`, authenticated queries and durable results. No dashboard agent is needed. Each request supplies instructions and a strict response schema, sets `store:false`, and never sends the SPARK token to OpenAI.
 
-The assistant supports caller-scoped conversation follow-ups, timer creation/listing, calendar occurrence queries and one-off event creation. Timer and event creations can be undone. Server-side permissions and validation control execution; model text alone never proves an action occurred. Calendar edits and removals require saved confirmation previews. Recurring-event creation, occurrence-level exceptions, file operations and assistant TCP updates remain future work.
+The assistant supports caller-scoped conversation follow-ups, timer creation/listing, calendar occurrence queries, one-off event creation, and read-only project names/descriptions, boards and tasks. Timer and event creations can be undone. Server-side permissions and validation control execution; model text alone never proves an action occurred. Calendar edits and removals require saved confirmation previews. Recurring-event creation, occurrence-level exceptions, file mutations and assistant TCP updates remain future work.
 
 ## Configuration
 
@@ -208,7 +208,7 @@ It requires assistant.use in token mode, with the same explicit opt-in in open
 mode. It contains no provider credentials or stored transcripts. The endpoint is
 also documented in `/api` and `/api/docs`.
 
-## Confirmed calendar edits and removals (API 1.54.0)
+## Confirmed calendar edits and removals (API 1.56.0)
 
 Apply `sql/026_assistant_confirmations.sql` using `./scripts/setup-db.sh` and rebuild.
 This adds durable pending previews and decision receipts, plus undo metadata.
@@ -261,3 +261,158 @@ action endpoint and does not ask for an additional confirmation.
 
 The normal `/events` APIs retain their existing contract; these previews govern
 assistant-mediated edits/removals. Creation still executes directly with undo.
+
+## Weekday dates and joint calendar reads
+
+For one-off creation, a weekday without a date means the next named day strictly
+**after today**, in Perth time. The server supplies the model with the upcoming
+dates. The assistant states the inferred date and asks the user to confirm via
+`needs_clarification`, collecting any missing time and destination calendar in
+the same question. Reply with a new request ID and the same conversation ID;
+no `confirmation_id` is needed for this date clarification. Explicit dates retain
+the existing creation flow. This conversational check is model-guided; the saved,
+server-enforced confirmation protocol continues to apply to edits/deletions.
+
+Occurrence queries accept `local`, `shared`, or `both`. “Both” may be supplied as
+a follow-up to the calendar selection question. The combined result is ordered
+by occurrence time then event ID, with a global 100-entry limit and `has_more`.
+Each entry retains `event.calendar`; separate events are not deduplicated by name.
+Writes still require a single destination calendar.
+
+## Read-only projects (API 1.56.0)
+
+The assistant can list project names/descriptions and read a selected project's
+boards, columns and tasks, including descriptions and severity. Examples: “List
+my projects”, “Read the SPARK Mobile project”, and “What tasks are on that project?”
+Subprojects are independently selectable, with parent_id included in results.
+Ambiguous names return needs_clarification and a projects array of candidates;
+answer with a new request ID and the same conversation ID. No project, board or
+task mutations are exposed. File paths and file contents are not read.
+
+Permissions: assistant.use plus projects.read for listing; selected project/board
+details additionally require boards.read. These are existing permissions. Reads
+and stored conversation context are permission-checked on every access.
+
+Responses include projects or project, a readable message and has_more. Board
+objects contain columns and tasks; tasks retain column_id and severity. Limits:
+100 project matches, 20 boards, 100 columns and 200 tasks per board. Per-board
+columns_has_more/tasks_has_more and overall has_more identify incomplete lists.
+Results exceeding 48 KiB fail with project_result_too_large; use the project
+explorer for larger projects. No new SQL migration is required.
+
+## Project text-file search (API 1.56.0)
+
+“Search the SPARK project files for notification” searches registered text-file
+names and contents in that project's directory and descendants (including nested
+subproject directories), on its assigned drive only. Project selection can come
+from a previous turn. Ambiguous project names require clarification. High-level requests do not require search terms.
+The tool requires assistant.use, projects.read and files.read; boards.read is not
+required. These are existing permissions. Saved results and conversational context
+recheck permissions. File contents are untrusted data, never instructions.
+
+Matching is literal and ASCII case-insensitive, not semantic or regex-based.
+Supported extensions: .txt, .json, .md, .markdown, .log, .csv, .tsv, .yaml, .yml,
+.toml, .ini and .xml, case-insensitive. Files must contain valid UTF-8 text without
+binary control bytes. Binary files, symlinks, nonregular files and oversized
+contents are skipped. A filename match may still be reported with content_skipped.
+An offline project drive fails with project_storage_unavailable; no fallback drive
+is searched. Arbitrary host paths, URLs, archives and file mutations are unsupported.
+
+The file_search response provides query, matches, files_scanned, bytes_read, skipped
+counts and has_more. Matches include file_id, logical path, drive_id, download_url,
+content_revision, name_match and up to three matching lines with line numbers and
+snippets. more_matching_lines indicates additional matching lines. Downloads still
+require the caller's normal authentication. No public lease is generated.
+
+Limits per page: 200 registered candidates in the order documented below, 1 MiB per file,
+8 MiB total bytes, 30 matching files, 320-byte UTF-8-safe snippets. has_more signals
+candidate/result/budget truncation; skipped counts describe content not searched.
+A zero-match result applies only to the scanned eligible text, not every project
+file. The existing 48 KiB response cap also applies. No new migration is required.
+
+## Browser query page
+
+Open `/assistant/explorer` (also linked from the dashboard) to type queries and
+follow-ups. It uses the current browser session, requires assistant.use, and
+respects each tool's normal permissions. Local open-mode access follows the
+existing explicit opt-in. The page never asks for or stores an OpenAI key.
+
+Enter sends; Shift+Enter inserts a newline. Confirm/Cancel approve saved previews;
+Undo reverses eligible actions. Response details expose structured results,
+including file-search citations. After a connection failure, Recover last request
+reuses the original request ID before allowing another query. New conversation
+clears the browser view but does not delete server history. The page's state is
+in memory only; reloading starts a fresh view.
+
+## High-level project file exploration
+
+Requests such as “Summarize the files in Demo” or “What does this project do?”
+can use project-file overview mode without keywords. The planner selects the
+existing file tool with a null/empty search query. SPARK reads up to 12 supported
+text files, prioritizing README/overview documents among the first 200 candidates,
+and supplies up to 1,600 UTF-8-safe bytes from each to a separate summary call.
+That call has no action tools and can only return a completed text response.
+Retrieved text is explicitly untrusted data. Existing project/file permissions,
+drive boundaries, binary checks and byte budgets continue to apply.
+
+file_search.mode is overview or search. Overview entries include excerpt,
+excerpt_start_line and content_truncated. Summaries cite sources and include a
+server-generated coverage list; has_more/skipped continue to indicate unexamined
+files. This is bounded exploration, not a guarantee that all files were read.
+summary_status reports completed, unavailable or no_readable_text. A failed
+summary retains retrieved excerpts and reports summary_error. No migration or
+new permission is needed. Excerpts are sent to the configured model provider to
+produce the summary, and retained in the caller's private conversation history.
+
+## Paginated project-file exploration (API 1.59.0)
+
+After a file overview or literal search, say **next page**, **continue**, or
+**more files** in the same conversation, or click **Explore next files** in the
+browser page. Each request reads one more bounded page and summarizes its
+excerpts. It does not launch unlimited automatic model calls.
+
+`file_search` now includes `page`, `candidates_examined`, `next_cursor` (server
+metadata), and `next_page_from`. To continue programmatically, send a new request:
+
+```json
+{"request_id":"page-2","text":"Next page","file_page_from":"previous-request-id"}
+```
+
+Use the returned next_page_from value. Do not send raw cursor fields, a new
+project or query, or conversation_id with this packet. The server loads the
+caller-owned saved result, rechecks permissions, and preserves its project and
+search terms. The text does not change the operation. Each continuation starts
+a fresh conversation ID to keep old excerpts from exhausting context limits;
+clients should use the returned ID for subsequent follow-ups. The exploration
+retains its original 24-hour expiry. Repeating an identical request ID returns
+the same page. A new ID is required for another page.
+
+Ordering is globally README first, overview.md next, then binary directory/name
+and file ID. Keyset pagination continues beyond the original 200-file candidate
+window, advances past unsupported/skipped files, and resumes at an unexamined
+file when a byte budget ends. Each page retains the existing 12-file overview,
+30-result search, 200-candidate and byte limits. `has_more: false` with a null
+next_page_from marks the end. An all-skipped page may still have a next page.
+
+This is a live view, not an immutable snapshot. Renames/moves or new files can
+affect later pages; begin a new exploration to refresh coverage after changes.
+Continuation errors include file_page_not_found, file_page_expired, and
+no_more_files. No migration or new permission is required.
+
+Pages created before pagination was deployed have no continuation cursor; start a fresh file overview/search to use this feature.
+
+## Filename-only project listing (API 1.60.0)
+
+Ask “List the filenames in Demo” or “What files are available in Demo?” to use
+metadata-only listing. It includes all registered file types, recursively within
+the selected project's directory and drive. No file bytes are opened or read,
+and no content summarization call is made. Metadata remains available for an
+offline drive. The filenames and sizes reflect registered database records.
+
+Requires assistant.use, projects.read and files.read. file_search.mode is names;
+matches contain file_id, name, path, size_bytes, extension, drive_id and download_url.
+bytes_read and files_scanned are zero; entries have no excerpts or content matches.
+Twenty files are returned per page. Use the existing next-page button, spoken
+continuation or file_page_from API field; continuation preserves names mode and
+requires no model call. Content search and overview remain separate choices.
+No database migration or new permission is required.

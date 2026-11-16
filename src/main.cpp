@@ -55,7 +55,7 @@ int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Mainten
         startup_check="assistant";
         std::shared_ptr<spark::ActionStore> actions;
         if(config.assistant){actions=std::make_shared<spark::ActionStore>(config.database);actions->verify();}
-        auto assistant=config.assistant?std::make_shared<spark::Assistant>(*config.assistant,spark::Assistant::Transport{},actions):nullptr;
+        auto assistant=config.assistant?std::make_shared<spark::Assistant>(*config.assistant,spark::Assistant::Transport{},actions,files):nullptr;
         spark::configure_assistant(server,assistant,auth);
         spark::configure_api(server, std::move(store), timers, notification_port, pulse, calendar, tasks, files, maintenance, auth, config.public_notifications());
     } catch (const std::exception& error) {

@@ -6,6 +6,9 @@ class ActionStore {
 public:
     explicit ActionStore(DatabaseConfig config):config_(std::move(config)){}
     void verify() const;
+    nlohmann::json projects(const std::string& name,const std::string& id) const;
+    nlohmann::json project_files(const std::string& id,const nlohmann::json& after = nullptr) const;
+    nlohmann::json project_boards(const std::string& id) const;
     std::optional<nlohmann::json> get(const std::string& id,const std::string& owner) const;
     nlohmann::json create_timer(const std::string& id,const std::string& owner,const std::string& fingerprint,const nlohmann::json& packet) const;
     nlohmann::json undo(const std::string& id,const std::string& owner) const;

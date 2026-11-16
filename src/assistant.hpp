@@ -1,6 +1,7 @@
 #pragma once
 #include "authorization.hpp"
 #include "actions.hpp"
+#include "files.hpp"
 #include <functional>
 #include <mutex>
 namespace spark {
@@ -13,7 +14,7 @@ void validate_assistant_config(const AssistantConfig&);
 class Assistant {
 public:
     using Transport=std::function<nlohmann::json(const nlohmann::json&)>;
-    explicit Assistant(AssistantConfig,Transport={},std::shared_ptr<ActionStore> = nullptr);
+    explicit Assistant(AssistantConfig,Transport={},std::shared_ptr<ActionStore> = nullptr,std::shared_ptr<FileStorage> = nullptr);
     bool has_tools() const { return bool(actions_); }
     nlohmann::json action(const Identity&,const std::string&,bool undo);
     nlohmann::json confirmation(const Identity&,const std::string&,const std::string& decision="");
@@ -22,6 +23,7 @@ public:
     nlohmann::json get(const Identity&,const std::string&);
 private:
     std::shared_ptr<ActionStore> actions_;
+    std::shared_ptr<FileStorage> files_;
     AssistantConfig config_;
     Transport transport_;
     std::mutex mutex_;

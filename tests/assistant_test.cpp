@@ -3,6 +3,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <iostream>
+#include <thread>
 using nlohmann::json;
 void check(bool b){if(!b)throw std::runtime_error("test failed");}
 int main(){
@@ -62,6 +63,12 @@ int main(){
  check(local.query(open,p)["status"]=="completed");
  check(local.get(open,"local")["status"]=="completed");
  rejected=false;try{local.query(who,p);}catch(...){rejected=true;}check(rejected);
+ auto page_assistant=std::make_shared<spark::Assistant>(config,transport);httplib::Server server;spark::configure_assistant(server,page_assistant,nullptr);
+ int port=server.bind_to_any_port("127.0.0.1");check(port>0);std::thread worker([&]{server.listen_after_bind();});server.wait_until_ready();httplib::Client client("127.0.0.1",port);
+ auto page=client.Get("/assistant/explorer");auto invalid=client.Get("/assistant/explorer?unexpected=yes");server.stop();worker.join();
+ check(page&&page->status==200&&page->get_header_value("Content-Type").find("text/html")==0&&page->get_header_value("Cache-Control")=="no-store");
+ check(page->body.find("/auth/client.js")!=std::string::npos&&page->body.find("confirmation_id")!=std::string::npos&&page->body.find("innerHTML")==std::string::npos);
+ check(invalid&&invalid->status==400);
  chmod(credential.c_str(),0644);rejected=false;
  try{spark::validate_assistant_config(config);}catch(...){rejected=true;}
  check(rejected);

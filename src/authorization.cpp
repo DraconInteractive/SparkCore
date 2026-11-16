@@ -30,6 +30,7 @@ const std::vector<RoutePolicy>& route_policies(){
         add("GET","/assistant/confirmations/{id}",{"assistant.use","events.read","events.write"});
         add("POST","/assistant/confirmations/{id}/confirm",{"assistant.use","events.read","events.write"});
         add("POST","/assistant/confirmations/{id}/cancel",{"assistant.use","events.read","events.write"});
+        add("GET","/assistant/explorer",{"assistant.use"});
         add("GET","/assistant/setup",{"assistant.use"});
         add("GET","/assistant",{"assistant.use"});
         add("POST","/assistant/requests",{"assistant.use"});

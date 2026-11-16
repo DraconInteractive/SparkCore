@@ -1587,6 +1587,30 @@ json ActionStore::create_timer(const std::string& id,const std::string& owner,co
  timer_event(c,"timer.created",timer,timer["source_device"]);
  Statement update(c,"UPDATE action_history SET resource=?,after_state=? WHERE id=?",{"/timers/"+timer_id,timer.dump(),id});update.execute();auto record=*read_action(c,id,owner);tx.commit();return record;
 }
+json ActionStore::projects(const std::string& name,const std::string& id)const{
+ Connection c(config_);std::string where;Parameters params;
+ if(!id.empty()){where=" WHERE id=?";params.push_back(id);}else if(!name.empty()){where=" WHERE LOCATE(LOWER(?),LOWER(CONVERT(name USING utf8mb4)))>0";params.push_back(name);}
+ Statement q(c,"SELECT JSON_OBJECT('id',id,'name',CONVERT(name USING utf8mb4),'description',description,'parent_id',parent_id) FROM projects"+where+" ORDER BY name,id LIMIT 101",params);q.execute();auto rows=q.rows();bool more=rows.size()>100;if(more)rows.erase(rows.end()-1);return {{"projects",rows},{"has_more",more}};
+}
+json ActionStore::project_files(const std::string& id,const json& after)const{
+ Connection c(config_);Transaction tx(c);
+ Statement project(c,"SELECT JSON_OBJECT('directory',CONVERT(directory USING utf8mb4),'drive_id',CONVERT(drive_id USING utf8mb4)) FROM projects WHERE id=?",{id});project.execute();auto projects=project.rows();if(projects.empty())return {{"missing",true}};
+ auto directory=projects[0]["directory"].get<std::string>(),prefix=directory+"/";auto drive=projects[0]["drive_id"].get<std::string>();
+ const std::string rank="CASE WHEN LOWER(CONVERT(name USING utf8mb4)) LIKE 'readme%' THEN 0 WHEN LOWER(CONVERT(name USING utf8mb4))='overview.md' THEN 1 ELSE 2 END";
+ Parameters params{drive,directory,prefix,prefix};std::string cursor;
+ if(!after.is_null()){if(!after.is_array()||after.size()!=4||!after[0].is_number_integer()||!after[1].is_string()||!after[2].is_string()||!after[3].is_string())throw std::invalid_argument("invalid_file_cursor");cursor=" AND ("+rank+",BINARY directory,BINARY name,id)>(CAST(? AS UNSIGNED),BINARY ?,BINARY ?,?)";params.push_back(std::to_string(after[0].get<int>()));for(int i=1;i<4;++i)params.push_back(after[i].get<std::string>());}
+ Statement q(c,"SELECT JSON_SET("+file_projection+",'$.page_rank',"+rank+") FROM files WHERE state='ready' AND drive_id=? AND (BINARY directory=BINARY ? OR LEFT(BINARY directory,OCTET_LENGTH(?))=BINARY ?)"+cursor+" ORDER BY "+rank+",BINARY directory,BINARY name,id LIMIT 201",params);q.execute();auto rows=q.rows();bool more=rows.size()>200;if(more)rows.erase(rows.end()-1);tx.commit();return {{"directory",directory},{"drive_id",drive},{"files",rows},{"has_more",more}};
+}
+json ActionStore::project_boards(const std::string& id)const{
+ Connection c(config_);Transaction tx(c);json boards=json::array();bool more=false;
+ Statement q(c,"SELECT "+board_projection+" FROM project_boards WHERE project_id=? ORDER BY name,id LIMIT 21",{id});q.execute();boards=q.rows();if(boards.size()>20){more=true;boards.erase(boards.end()-1);}
+ for(auto& board:boards){
+  Statement columns(c,"SELECT "+column_projection+" FROM project_columns WHERE board_id=? ORDER BY created_at,id LIMIT 101",{board["id"].get<std::string>()});columns.execute();board["columns"]=columns.rows();board["columns_has_more"]=board["columns"].size()>100;if(board["columns_has_more"]==true)board["columns"].erase(board["columns"].end()-1);
+  Statement tasks(c,"SELECT "+task_projection+" FROM project_tasks WHERE board_id=? ORDER BY created_at,id LIMIT 201",{board["id"].get<std::string>()});tasks.execute();board["tasks"]=tasks.rows();board["tasks_has_more"]=board["tasks"].size()>200;if(board["tasks_has_more"]==true)board["tasks"].erase(board["tasks"].end()-1);
+  more=more||board["columns_has_more"].get<bool>()||board["tasks_has_more"].get<bool>();
+ }
+ tx.commit();return {{"boards",boards},{"has_more",more}};
+}
 json ActionStore::occurrences(const json& filters)const{return CalendarStore(config_).list(filters,true);}
 json ActionStore::create_event(const std::string& id,const std::string& owner,const std::string& fingerprint,const json& packet)const{
  auto data=packet;data.erase("calendar");data.erase("source_device");data=calendar_sync_data(data);
