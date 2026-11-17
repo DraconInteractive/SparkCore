@@ -33,6 +33,7 @@ const std::vector<RoutePolicy>& route_policies(){
         add("GET","/assistant/explorer",{"assistant.use"});
         add("GET","/assistant/setup",{"assistant.use"});
         add("GET","/assistant",{"assistant.use"});
+        add("POST","/assistant/prime",{"assistant.use"});
         add("POST","/assistant/requests",{"assistant.use"});
         add("GET","/assistant/requests/{id}",{"assistant.use"});
         for(auto path:{"/backups/new","/backups/progress","/admin/backup-status"})add("GET",path,{"admin.backup"});
@@ -46,6 +47,10 @@ const std::vector<RoutePolicy>& route_policies(){
         for(auto path:{"/configs","/configs/explorer","/configs/{id}","/configs/{id}/content"})add("GET",path,{"configs.read"});
         add("POST","/configs",{"configs.write"});add("PATCH","/configs/{id}",{"configs.write"});add("DELETE","/configs/{id}",{"configs.write"});
         add("POST","/auth/verify",{});
+        add("POST","/backups/{id}/downloads",{"admin.backup"});
+        add("GET","/backups/downloads/{id}",{"admin.backup"});
+        add("GET","/backups/downloads/{id}/content",{"admin.backup"});
+        add("DELETE","/backups/downloads/{id}",{"admin.backup"});
         for(auto path:{"/backups","/backups/explorer","/backups/drives","/backups/jobs","/backups/{id}/files/{name}"})add("GET",path,{"admin.backup"});
         add("DELETE","/backups/jobs/completed",{"admin.backup"});add("DELETE","/backups/jobs/{id}",{"admin.backup"});add("DELETE","/backups/{id}",{"admin.backup"});add("POST","/backups/{id}/transfers",{"admin.backup"});add("POST","/backups/jobs/{id}/retry",{"admin.backup"});
         for(auto path:{"/connections","/connections/explorer"})add("GET",path,{"admin.connections"});

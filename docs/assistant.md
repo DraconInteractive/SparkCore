@@ -1,4 +1,4 @@
-# Assistant (API 1.61.0)
+# Assistant (API 1.63.0)
 
 SPARK uses a C++ OpenAI Responses adapter with `gpt-6-luna`, authenticated queries and durable results. No dashboard agent is needed. Each request supplies instructions and a strict response schema, sets `store:false`, and never sends the SPARK token to OpenAI.
 
@@ -436,3 +436,111 @@ and assigned drive. Absolute paths, parent/dot segments, backslashes and control
 characters are rejected. A trailing slash is normalized. Missing folders return
 project_directory_not_found, distinct from existing folders with zero files, and
 never fall back to the full project. No migration or new permission is required.
+
+## Private/local assistant processing (API 1.62.0)
+
+POST `/assistant/requests` accepts an optional boolean `secure`. Use `true` for
+local inference; all planning, calendar proposal preparation and file summary
+calls use the configured local backend, with no external fallback. Responses and
+stored receipts include `secure` and `processing_backend` (`local` or `external`).
+
+```json
+{"request_id":"private-001","text":"Summarise the Demo project files","secure":true}
+```
+
+Follow-ups and file pagination inherit privacy from their originating conversation
+or page. Omit `secure` on these requests. An explicit change in either direction
+returns `409 conversation_privacy_conflict`; start a new conversation to change
+backend. Legacy conversations without a privacy field are external. Retries must
+resubmit the identical packet (including the flag) with the same request ID.
+
+Add `local` inside the existing `assistant` configuration:
+
+```json
+"local": {
+  "endpoint": "http://192.168.4.30:8080/v1/chat/completions",
+  "protocol": "chat_completions",
+  "model": "your-local-model"
+}
+```
+
+Alternatively use `protocol: "responses"` and an endpoint ending in
+`/v1/responses`. These are full URLs, not API base URLs. The Chat Completions
+adapter sends system/user/assistant messages and strict `response_format` JSON
+schema (not tool calls). The Responses adapter sends the existing structured
+output schema without an OpenAI reasoning setting. The backend must support that
+schema and return valid JSON; plain prose or tool-call output is rejected.
+Maximum output is 2,048 tokens; each provider call has a 45-second timeout and a
+1 MiB response limit. Model sizing and end-to-end latency need testing on your
+actual hardware.
+
+An optional `local.credentials_file` points to a private mode-0600 JSON file
+containing `{"api_key":"your-local-server-token"}`. It is independent of the
+external provider key; without it no Authorization header is sent locally.
+Private files must remain outside shared storage. Paths resolve relative to the
+config file. `--check-config` validates settings, not model reachability.
+
+Only literal private IPv4 addresses (RFC1918, loopback or Tailscale/CGNAT
+100.64.0.0/10), IPv6 ULA and IPv6 loopback are accepted. DNS names, public
+addresses, URL credentials, query strings and redirects are prohibited. Local
+calls bypass environment HTTP proxies. HTTPS certificate verification remains
+enabled. HTTP is allowed for a trusted LAN or Tailscale path; the `secure` flag
+is an inference routing policy, not a promise of HTTP transport encryption.
+
+Set `assistant.require_secure: true` to default new conversations to local and
+reject explicit external requests or external conversation continuations with
+`403 secure_assistant_required`. External `assistant.credentials_file` may be
+omitted when a local backend exists. Without `require_secure`, new unmarked
+requests still select external inference and fail if no external key is configured.
+A secure request without a configured local backend returns
+`503 local_assistant_not_configured`. Runtime local failures produce failed
+receipts (or an unavailable summary with locally retrieved excerpts), never an
+external retry. `/assistant` and `/assistant/setup` advertise local availability;
+`/assistant/explorer` offers a Secure? checkbox locked for a conversation.
+
+Permissions, confirmations, undo and file-read bounds remain unchanged. SPARK
+still stores transcripts and retrieved plaintext in its private state directory;
+24-hour context expiry does not delete disk history. This feature does not decrypt
+files or add per-project restrictions. Use `require_secure` on an instance that
+must never send assistant data externally until per-project policies are added.
+When away from home, connect the client to the home SPARK instance through
+Tailscale. This feature adds no VPS relay or automatic instance switching.
+
+## Preload the local model
+
+Call `POST /assistant/prime` with an empty body or `{}` when opening the assistant
+or beginning voice capture. Use the same SPARK authentication as assistant queries
+(`assistant.use`; browser sessions require CSRF). Explicit local open access also
+works. The endpoint always targets `assistant.local`, never the external provider.
+
+```json
+{"status":"ready","secure":true,"processing_backend":"local","model":"gpt-oss:20b","elapsed_ms":1234}
+```
+
+SPARK sends a fixed tiny prompt with a minimal output budget, with no user data,
+conversation history, tools or stored request receipt. Token-limit completion is
+accepted because warming the model does not require a useful answer. The call is
+synchronous with a 180-second provider timeout; allow at least 190 seconds on the
+client. Do not block microphone capture while waiting. A failed call never falls
+back externally. Missing backend: 503 `local_assistant_not_configured`; active
+assistant operation: 429 `assistant_busy`. Prime holds the same operation lock as
+queries; wait for it to complete or retry after a busy response. Requests with
+fields or query parameters are rejected. Retrying is safe and starts another
+small inference call; no request ID is required.
+
+Readiness is point-in-time: this does not pin the model in memory or override
+Ollama's configured ten-minute inactivity unload. Prime again before use after
+idle periods, rather than running a periodic keepalive that defeats unloading.
+Ordinary queries retain their existing 45-second per-call timeout.
+
+### Local model output contracts
+
+Chat Completions requests explicitly set `tool_choice: "none"`, use temperature
+zero to reduce output variation, and include the
+JSON proposal schema in the system instructions as well as `response_format`.
+SPARK executes validated JSON proposals itself; native model function calls are
+not accepted. A backend returning such a call produces
+`unexpected_provider_tool_call`. `incomplete_provider_response` remains the error
+for truncated or otherwise unfinished output. Neither error executes the proposed
+action or triggers an external fallback. Use a new request ID after correcting
+the problem; retrying the identical failed request returns its stored receipt.

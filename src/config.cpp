@@ -120,7 +120,7 @@ ServerConfig ServerConfig::load(int argc,char** argv) {
         }
     }
     if(root.contains("assistant")){
-        const auto& a=root["assistant"];keys(a,{"credentials_file","state_directory","model","reasoning","allow_open_access"},"assistant");
+        const auto& a=root["assistant"];keys(a,{"credentials_file","state_directory","model","reasoning","allow_open_access","local","require_secure"},"assistant");
         AssistantConfig c;
         if(a.contains("allow_open_access")){
             require(a["allow_open_access"].is_boolean(),"assistant.allow_open_access must be a boolean");
@@ -128,11 +128,20 @@ ServerConfig ServerConfig::load(int argc,char** argv) {
         }
         require(!result.remote||!c.allow_open_access,"Remote mode forbids assistant.allow_open_access");
         require(result.auth.has_value()||c.allow_open_access,"Assistant requires token authentication or explicit allow_open_access");
-        c.credentials_file=path_value(string_field(a,"credentials_file",{},"assistant.credentials_file"),base,"assistant.credentials_file");
+        if(a.contains("credentials_file"))c.credentials_file=path_value(string_field(a,"credentials_file",{},"assistant.credentials_file"),base,"assistant.credentials_file");
+        if(a.contains("require_secure")){require(a["require_secure"].is_boolean(),"assistant.require_secure must be boolean");c.require_secure=a["require_secure"].get<bool>();}
+        if(a.contains("local")){
+            const auto& l=a["local"];keys(l,{"endpoint","model","protocol","credentials_file"},"assistant.local");LocalAssistantConfig local;
+            local.endpoint=string_field(l,"endpoint",{},"assistant.local.endpoint");
+            local.model=string_field(l,"model",{},"assistant.local.model");
+            local.protocol=string_field(l,"protocol",local.protocol,"assistant.local.protocol");
+            if(l.contains("credentials_file"))local.credentials_file=path_value(string_field(l,"credentials_file",{},"assistant.local.credentials_file"),base,"assistant.local.credentials_file");
+            c.local=local;
+        }
         c.state_directory=path_value(string_field(a,"state_directory",{},"assistant.state_directory"),base,"assistant.state_directory");
         c.model=string_field(a,"model",c.model,"assistant.model");
         c.reasoning=string_field(a,"reasoning",c.reasoning,"assistant.reasoning");
-        for(const auto& drive:result.drives)require(!ancestor(drive,c.credentials_file)&&!ancestor(drive,c.state_directory),"Assistant private files must be outside shared drives");
+        for(const auto& drive:result.drives)require((c.credentials_file.empty()||!ancestor(drive,c.credentials_file))&&(!c.local||c.local->credentials_file.empty()||!ancestor(drive,c.local->credentials_file))&&!ancestor(drive,c.state_directory),"Assistant private files must be outside shared drives");
         validate_assistant_config(c);result.assistant=c;
     }
     if(result.remote || result.tls_notification_port){
@@ -179,6 +188,8 @@ json ServerConfig::summary() const {
         {"server",{{"host",host},{"port",port},{"notification_port",notification_port}}},
         {"storage",{{"drives",paths}}},{"auth_mode",auth?"required":"open"},{"remote",remote}};
     output["assistant_enabled"]=assistant.has_value();
+    output["assistant_local_configured"]=assistant&&assistant->local.has_value();
+    output["assistant_require_secure"]=assistant&&assistant->require_secure;
     output["assistant_allow_open_access"]=assistant&&assistant->allow_open_access;
     if(auth)output["google_login_configured"]=auth->google.has_value();
     if(remote){output["browser_origin"]=auth->browser_origin;output["public_notifications"]=public_notifications();}

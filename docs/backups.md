@@ -397,3 +397,71 @@ notice when directories are not owner-only. Symlink directories are rejected;
 private control data and local backup storage retain their strict permission checks.
 No remount, ownership change, or broad chmod is performed. A move retains its
 source until destination verification and filesystem flushing succeed.
+
+## Download a VPS backup to a PC
+
+Create a backup into the VPS's persistent storage first (leave its destination
+blank), then open `/backups/explorer`. Under the completed backup, use **Download
+to PC → Prepare download**. Preparation scans the existing compressed parts for
+ZIP CRCs and shows byte progress. When ready, **Download ZIP** streams the entire
+backup, including `manifest.txt`, `SHA256SUMS`, `drives.tsv` where applicable, and
+all database/storage parts. Extracting it yields the original `spark-...` directory
+for the verification/restore procedures above.
+
+The ZIP64 wrapper does not recompress the already-compressed parts and is **not
+written as a second full archive on the server**. Preparation reads each source
+once, and each HTTP response streams bounded 64 KiB buffers. The ZIP can exceed
+4 GiB; choose a PC filesystem such as NTFS/exFAT that can hold the resulting single
+file (FAT32 cannot). The original parts inside it remain at most 1 GiB each.
+
+The download URL and ZIP bytes remain stable across SPARK restarts for **seven
+days**, provided the original backup remains unchanged. The browser remembers the
+session ID for this backup and displays the same link on return. Use the browser's
+Resume action or a download manager that supports HTTP ranges; clicking the link
+again may start a new download, depending on the browser. Authentication is still
+required for every request, with the original credential and `admin.backup`.
+A URL alone is not public access. Browser sessions may require signing in again.
+
+For explicit restart-safe progress, copy the download URL and run the optional
+standard-library Python helper on the PC:
+
+```sh
+python3 scripts/download-backup.py \
+  'https://spark.example.com/backups/downloads/SESSION_ID/content' \
+  spark-backup.zip
+```
+
+It prompts for a SPARK administrator token (or reads `SPARK_TOKEN` from the
+environment). Tokens are never saved in the progress file or URL. Windows users
+can use `py` in place of `python3`. Re-run the **same command** after interruption;
+it retains `spark-backup.zip.part` plus a `.spark-download.json` progress file,
+requests 16 MiB ranges, flushes each completed range, and verifies the entire ZIP's
+CRCs before publishing the final filename. At most the interrupted range must be
+retried. It refuses changed ETags/URLs, redirects, inconsistent partial files and
+existing output files. HTTPS certificates are verified. For a trusted local HTTP
+connection, explicitly add `--allow-http`; `--open` is only for open instances.
+ZIP checksum failures require investigation/new download, not blindly accepting
+the partial archive. Afterwards also run the backup's SHA256 verification before
+restoring.
+
+New API:
+
+- `POST /backups/{backup_id}/downloads` with `{}`: returns 202 and a download session.
+- `GET /backups/downloads/{id}`: preparation state, `prepared_bytes`, `total_bytes`,
+  `archive_bytes` when ready, `expires_at`, and `download_url`.
+- `GET /backups/downloads/{id}/content`: ZIP bytes; also supports HEAD, byte Range,
+  strong ETag and If-Range. Matching ranges return 206; impossible ranges return
+  416. A mismatched If-Range returns the whole ZIP, never an incompatible fragment.
+- `DELETE /backups/downloads/{id}`: remove a finished session; retain the backup.
+
+These endpoints require an administrator identity with `admin.backup` in token
+mode; downloads are bound to the initiating credential. A `files.read` grant does
+not expose private backups. Existing file-folder ZIP sessions remain separate.
+Only one ZIP preparation runs at once, with up to 64 unexpired sessions shared
+with folder downloads. Preparing sessions interrupted by restart must be recreated;
+ready sessions can resume. Expired sessions require new preparation.
+
+Do not move or delete the source backup until the PC download finishes. Source
+replacement/modification is rejected before a resumed response (409), or aborts
+an active stream. Downloading does not remove the server copy. The source backups
+and resulting ZIP are not encrypted; use HTTPS and protect the PC copy.

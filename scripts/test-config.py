@@ -113,6 +113,17 @@ with tempfile.TemporaryDirectory(prefix='spark-config-') as temporary:
     check({**packet,'assistant':{**assistant,'reasoning':'invalid'}},2)
     check({**packet,'assistant':{**assistant,'endpoint':'https://evil.example'}},2)
     check({**packet,'storage':{'drives':[str(assistant_dir)]},'assistant':assistant},2)
+    local_backend={'endpoint':'http://100.100.1.2:8080/v1/chat/completions','model':'local/model:small','protocol':'chat_completions'}
+    local_assistant={**assistant,'local':local_backend,'require_secure':True}
+    assert check({**packet,'assistant':local_assistant})['assistant_local_configured']
+    del local_assistant['credentials_file']
+    assert check({**packet,'assistant':local_assistant})['assistant_require_secure']
+    for host in ['127.0.0.1','10.0.0.1','172.16.0.1','192.168.4.20','[::1]','[fd7a:115c:a1e0::1]']:
+        assert check({**packet,'assistant':{**local_assistant,'local':{**local_backend,'endpoint':f'http://{host}:8080/v1/chat/completions'}}})['assistant_local_configured']
+    for overrides in [{'endpoint':'http://8.8.8.8/v1/chat/completions'}, {'protocol':'invalid'}, {'model':''}, {'credentials_file':str(assistant_dir/'missing.json')}, {'endpoint':'http://192.168.1.1/v1/responses'}]:
+        check({**packet,'assistant':{**local_assistant,'local':{**local_backend,**overrides}}},2)
+    check({**packet,'assistant':{**assistant,'require_secure':True}},2)
+    check({**packet,'assistant':{**assistant,'require_secure':'true'}},2)
     assistant_key.chmod(0o644);check({**packet,'assistant':assistant},2);assistant_key.chmod(0o600)
     assistant_dir.chmod(0o755);check({**packet,'assistant':assistant},2);assistant_dir.chmod(0o700)
     private=root/'google-private';private.mkdir(mode=0o700)

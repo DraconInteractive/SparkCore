@@ -30,7 +30,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.61.0";
+constexpr auto api_version = "1.64.0";
 struct Endpoint {
     std::string path;
     std::string description;

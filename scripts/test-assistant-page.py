@@ -6,9 +6,9 @@ if not shutil.which('firefox'):
 page=Path('src/assistant_page.hpp').read_text().split('R"HTML(',1)[1].split(')HTML"',1)[0]
 check=r'''<script>
 (async()=>{const $=id=>document.getElementById(id);const wait=async f=>{for(let i=0;i<100;i++){if(f())return;await new Promise(r=>setTimeout(r,100));}throw Error('UI timeout');};const assert=(b,m)=>{if(!b)throw Error(m);};
-try{await wait(()=>!$('send').disabled);$('query').value='First question';$('form').requestSubmit();await wait(()=>!$('send').disabled);assert(document.querySelectorAll('#messages img').length===0,'unsafe HTML rendering');
+try{await wait(()=>!$('send').disabled);$('secure').checked=true;$('query').value='First question';$('form').requestSubmit();await wait(()=>!$('send').disabled);assert(document.querySelectorAll('#messages img').length===0,'unsafe HTML rendering');assert($('secure').disabled,'privacy locked during conversation');
 $('query').value='Follow up';$('form').requestSubmit();await wait(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Confirm'&&!b.disabled));[...document.querySelectorAll('button')].find(b=>b.textContent==='Confirm').click();await wait(()=>[...document.querySelectorAll('button')].some(b=>b.textContent==='Undo'&&!b.disabled));[...document.querySelectorAll('button')].find(b=>b.textContent==='Undo').click();await wait(()=>$('messages').textContent.includes('Action undone.'));
-$('query').value='Recover me';$('form').requestSubmit();await wait(()=>!$('retry').hidden&&!$('retry').disabled);assert($('send').disabled&&$('new').disabled,'uncertain request not blocked');$('retry').click();await wait(()=>!$('send').disabled);const next=[...document.querySelectorAll('button')].find(b=>b.textContent==='Explore next files');assert(next,'next page button');next.click();await wait(()=>$('messages').textContent.includes('Second page'));$('new').click();assert($('messages').children.length===0,'new conversation');await fetch('/result',{method:'POST',body:JSON.stringify({ok:true})});
+$('query').value='Recover me';$('form').requestSubmit();await wait(()=>!$('retry').hidden&&!$('retry').disabled);assert($('send').disabled&&$('new').disabled,'uncertain request not blocked');$('retry').click();await wait(()=>!$('send').disabled);const next=[...document.querySelectorAll('button')].find(b=>b.textContent==='Explore next files');assert(next,'next page button');next.click();await wait(()=>$('messages').textContent.includes('Second page'));$('new').click();assert($('messages').children.length===0,'new conversation');assert(!$('secure').disabled,'privacy selectable for new conversation');await fetch('/result',{method:'POST',body:JSON.stringify({ok:true})});
 }catch(e){await fetch('/result',{method:'POST',body:JSON.stringify({ok:false,error:e.message})});}})();</script>'''
 page=page.replace('</body>',check+'</body>')
 result=None;requests=[];retries=[]
@@ -47,7 +47,8 @@ with tempfile.TemporaryDirectory(prefix='spark-ui-firefox-') as profile:
    if result is not None:break
    time.sleep(.1)
   assert result and result.get('ok'),result
-  assert requests[1]['conversation_id']=='test-conversation'
+  assert requests[0]['secure'] is True
+  assert requests[1]['conversation_id']=='test-conversation' and 'secure' not in requests[1]
   assert len(retries)==2 and retries[0]==retries[1]
   print('PASS: Firefox query/follow-up, safe text rendering, confirmation, undo, identical-ID recovery pagination and new conversation')
  finally:p.terminate();p.wait(timeout=15);server.shutdown()
