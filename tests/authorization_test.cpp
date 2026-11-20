@@ -26,6 +26,11 @@ int main(){try{
     Identity reader{"id","watch","device",{"notifications.read","events.read"}};
     check(notification_permitted(reader,{{"type","calendar.reminder"}}),"reminder permission");
     for(const auto& type:{"timer.expired","file.created","project.updated","command.available","command.updated","device.updated","unknown"})check(!notification_permitted(reader,{{"type",type}}),"notification disclosure");
+    check(!notification_permitted(reader,{{"type","budget.expense.created"}}),"financial notification denied without budget grant");
+    reader.permissions={"budget.read","notifications.read"};
+    check(notification_permitted(reader,{{"type","budget.subscription.reminder"}}),"budget reminder allowed");
+    reader.permissions={"budget.read"};
+    check(!notification_permitted(reader,{{"type","budget.expense.updated"}}),"budget notifications need feed grant");
     reader.permissions={"configs.read","notifications.read"};
     check(notification_permitted(reader,{{"type","config.updated"}}),"config notification access");
     reader.permissions={"configs.read"};

@@ -61,6 +61,11 @@ with tempfile.TemporaryDirectory(prefix='spark-provision-') as directory:
             with urllib.request.urlopen(req,timeout=5) as response:assert response.status==204
             config_record=call('/configs',{'name':'Provisioned config','data':{'ok':True}})
             assert call('/configs/'+config_record['id'])['data']=={'ok':True}
+            expense=call('/budget/expenses',{'name':'Provisioned expense','amount_cents':1100,'gst_cents':100})
+            assert call('/budget/expenses/'+expense['id'])['gst_cents']==100
+            subscription=call('/budget/subscriptions',{'name':'Provisioned subscription','amount_cents':500,'cadence':'monthly','next_billing_date':expense['spent_on'],'reminder_days':0})
+            payment=call('/budget/subscriptions/'+subscription['id']+'/payments',{'revision':1,'scheduled_date':subscription['next_billing_date']})
+            assert payment['expense']['amount_cents']==500 and payment['subscription']['revision']==2
             event=call('/events',{'calendar':'shared','name':'Provisioning','description':'Restricted user','occurs_at':'2035-01-01T00:00:00Z'})
             info=call('/calendar-sync')
             item=call('/calendar-sync/changes')['items'][0]

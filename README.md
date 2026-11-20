@@ -45,6 +45,12 @@ curl http://localhost:47683/version
 curl http://localhost:47683/api
 ```
 
+## Budget tracking
+
+Use `/budget/explorer` for expenses (including optional GST), recurring subscriptions,
+explicit payment recording and subscription-only or historical-pattern forecasts.
+See the [budget guide](docs/budget.md) for API details, new permissions and migration.
+
 ## Device contract
 
 The three GET endpoints take no required headers, query parameters, or request

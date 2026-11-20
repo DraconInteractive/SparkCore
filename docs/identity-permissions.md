@@ -80,6 +80,7 @@ These rules are enforced by the shared route allowlist:
 | `pulse.read`, `pulse.write` | Read pulse settings/state, modify settings or subscription; subscription changes additionally require device identity |
 | `timers.read`, `timers.write` | Read timers, create/change/acknowledge/stop timers |
 | `events.read`, `events.write` | Read calendar series/occurrences, create/change/delete series |
+| `budget.read`, `budget.write` | Read expenses, subscriptions, summaries and forecasts; create/edit/delete records and record payments |
 | `tasks.read`, `tasks.write` | Read daily tasks, create/change/delete/check tasks |
 | `files.read`, `files.write` | Read metadata/directories/content, upload/create/edit/move/delete files or folders |
 | `projects.read`, `projects.write` | Read projects/hierarchies, create/change/delete projects |

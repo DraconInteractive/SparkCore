@@ -1,3 +1,4 @@
+#include "budget.hpp"
 #include "configs.hpp"
 #include <queue>
 #include <unordered_map>
@@ -1664,3 +1665,5 @@ json ActionStore::undo(const std::string& id,const std::string& owner)const{
  json reversal={{"before",before},{"after",stopped}};Statement update(c,"UPDATE action_history SET status='undone',undo_state=?,undone_at=CURRENT_TIMESTAMP(6) WHERE id=?",{reversal.dump(),id});update.execute();auto result=*read_action(c,id,owner);tx.commit();return result;
 }
 }
+
+#include "budget_database.inc"

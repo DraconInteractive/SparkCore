@@ -1,3 +1,4 @@
+#include "budget.hpp"
 #include "configs.hpp"
 #include "logging.hpp"
 #include "api.hpp"
@@ -46,6 +47,7 @@ int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Mainten
         startup_check="calendar"; calendar->verify();
         tasks = std::make_shared<spark::DailyTaskStore>(spark::DatabaseConfig::from_environment());
         startup_check="daily_tasks"; tasks->verify();
+        startup_check="budget"; spark::BudgetStore(spark::DatabaseConfig::from_environment()).verify();
         startup_check="configs"; spark::ConfigStore(spark::DatabaseConfig::from_environment()).verify();
         auto files = std::make_shared<spark::FileStorage>(std::make_shared<spark::FileStore>(spark::DatabaseConfig::from_environment()),spark::FileStorage::default_roots());
         startup_check="projects"; spark::ProjectStore(spark::DatabaseConfig::from_environment()).verify();
@@ -77,6 +79,7 @@ int run_server(const spark::ServerConfig& config, std::shared_ptr<spark::Mainten
         spark::log_exception("error","notification","Notification startup failed",error);
         return 1;
     }
+    spark::BudgetScheduler budget_scheduler(std::make_shared<spark::BudgetStore>(spark::DatabaseConfig::from_environment()));
     spark::CommandScheduler command_scheduler(commands);
     spark::TimerScheduler scheduler(timers);
     spark::PulseScheduler pulse_scheduler(pulse);
