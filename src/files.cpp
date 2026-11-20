@@ -1,3 +1,7 @@
+#include "file_crypto.hpp"
+#include <openssl/crypto.h>
+#include <cstring>
+#include <set>
 #include "logging.hpp"
 #include "calendar.hpp"
 #include <openssl/rand.h>
@@ -274,6 +278,7 @@ bool public_file_download_route(const httplib::Request& request){
 }
 void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storage, std::shared_ptr<Authorization> auth){
     configure_folder_downloads(server,storage,auth);
+#include "file_encryption_routes.inc"
     auto upload=[storage,auth](const httplib::Request& request,httplib::Response& response,const httplib::ContentReader& read){
         // Close after rejected uploads: their unread bodies must not become another request.
         auto bad=[&](int status,const char* code){response.set_header("Connection","close");failure(response,status,code);};
@@ -342,6 +347,8 @@ void configure_files(httplib::Server& server,std::shared_ptr<FileStorage> storag
             const auto old_revision=(*record)["content_revision"].get<std::string>();
             const auto etag="\""+id+(old_revision.empty()?"":"-"+old_revision)+"\"";
             if(request.get_header_value("If-Match")!=etag){bad(412,"file_changed");return;}
+            Descriptor original(open(storage->content_path(*record).c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW));
+            if(file_cipher_info(original.fd).encrypted){bad(409,"encrypted_file_requires_encrypted_edit");return;}
             std::random_device random;std::string revision;const char* hex="0123456789abcdef";
             for(int i=0;i<32;++i)revision+=hex[random()&15];
             auto next=*record;next["content_revision"]=revision;const auto candidate=storage->content_path(next);
@@ -567,6 +574,11 @@ json file_endpoints(){
     endpoints.push_back({{"method","GET"},{"path","/files/{id}/leases"},{"description","List leases, newest first, without their secrets. active is false after expiry or content replacement; drive availability is separate. Revoked leases are removed. Requires files.read and files.share."},{"input",{{"query",{{"limit","1..100, default 50"},{"offset","0..1000000, default 0"}}}}},{"output",{{"status",200},{"body",{{"leases",json::array({lease})},{"limit",50},{"offset",0},{"has_more",false}}}}}});
     endpoints.push_back({{"method","DELETE"},{"path","/files/{id}/leases/{lease_id}"},{"description","Revoke a public download immediately for new requests. Requires files.read and files.share. No body."},{"input",{{"body",nullptr}}},{"output",{{"status",204},{"body",nullptr}}}});
     endpoints.push_back({{"method","GET"},{"path","/downloads/{token}"},{"access","public bearer link"},{"description","Download the leased file without Authorization. GET/HEAD and byte ranges supported. Invalid, expired, revoked, deleted or replaced files return 404 download_unavailable. Offline storage returns 503. Always an attachment with no-store and no-referrer. The URL secret grants access to one file revision only."},{"input",{{"body",nullptr}}},{"output",{{"status",200},{"body","Raw file bytes"}}}});
+    endpoints.push_back({{"method","GET"},{"path","/files/{id}/encryption"},{"description","Inspect the SPARKENC-1 envelope and retrieve the current ETag. Requires files.read. No password needed; encrypted=true does not authenticate the file. Unsupported/damaged envelopes return 409."},{"input",{{"body",nullptr}}},{"output",{{"status",200},{"body",{{"encrypted",true},{"format","SPARKENC-1"},{"plaintext_bytes",1024}}}}}});
+    auto crypt_doc=[&](const char* method,const char* path,const char* description,json body,json output){endpoints.push_back({{"method",method},{"path",path},{"description",description},{"input",{{"headers",{{"Content-Type","application/json"},{"If-Match","exact quoted ETag from GET /files/{id}/encryption or /content"}}},{"body",body}}},{"output",{{"status",200},{"body",output}}},{"errors",{{"400","invalid_packet, invalid_password, password_required, password_too_short, invalid_mode, text_required, invalid_text, unknown_field, duplicate_json_key"},{"401","unauthorized"},{"403","forbidden"},{"404","file_not_found"},{"409","file_already_encrypted, file_not_encrypted, damaged_encrypted_file, unsupported_encryption_format"},{"412","file_changed"},{"413","payload_too_large, preview_too_large, text_too_large"},{"415","unsupported_media_type"},{"422","incorrect_password_or_damaged_file"},{"428","precondition_required"},{"503","encryption_busy, encryption_unavailable, storage_unavailable, database_unavailable"},{"507","insufficient_storage"}}}});};
+    crypt_doc("POST","/files/{id}/encrypt","Replace content with SPARKENC-1 password-encrypted bytes. Requires files.read + files.write. Password 8..1024 UTF-8 bytes, no password recovery or persistent password storage. scrypt (N=32768,r=8,p=3) and AES-256-GCM authenticated 1 MiB chunks, fresh random salt/nonce each save. Streams arbitrary binary files with bounded memory; theoretical envelope limit below 4 PiB. Preserves ID/name/directory; emits file.updated and invalidates old revision leases. Use HTTPS or a trusted encrypted tunnel: encryption happens on the server. Existing backups/downloaded copies are unchanged.",{{"password","<password>"}},file);
+    crypt_doc("POST","/files/{id}/decrypt","Password (1..1024 UTF-8 bytes) and mode required. view: temporary plaintext response, up to 10 MiB, files.read. edit: temporary UTF-8 text response, up to 2 MiB, files.read + files.write. Neither changes stored bytes; responses are application/octet-stream with no-store and ETag. full: permanently replace with plaintext and return file metadata/new ETag; files.read + files.write required. Full supports binary files and streams to an unpublished revision; failures leave current content unchanged. All modes authenticate before releasing plaintext or committing. Password is never placed in a URL.",{{"password","<password>"},{"mode","view"}},"Raw decrypted bytes for view/edit; file metadata for full");
+    crypt_doc("PUT","/files/{id}/encrypted-content","Save edited UTF-8 text encrypted with the supplied password. Requires files.read + files.write. Authenticates the existing encrypted file before accepting edits; exact If-Match prevents lost updates. Text up to 2 MiB; JSON request up to 12 MiB + 16 KiB for escaping. Fresh salt/nonce every save. Plaintext exists in request memory only, not a temporary server file. Emits file.updated and invalidates old leases. Ordinary PUT /files/{id}/content rejects encrypted files with 409 encrypted_file_requires_encrypted_edit.",{{"password","<password>"},{"text","Updated text\n"}},file);
     return endpoints;
 }
 }

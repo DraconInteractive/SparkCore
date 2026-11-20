@@ -31,7 +31,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.65.0";
+constexpr auto api_version = "1.66.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -173,7 +173,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
             const auto value=request.get_header_value("Content-Length");std::uint64_t length=0;
             const auto parsed=std::from_chars(value.data(),value.data()+value.size(),length);
             if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || request.get_header_value_count("Content-Length")!=1 || request.has_header("Transfer-Encoding"))return reject(400,"invalid_content_length");
-            if(!upload && length>(std::regex_match(request.path,std::regex(R"(/projects/transfers/[0-9a-f]{32}/apply)"))?16777216:text_edit?2097152:request.path=="/calendar-sync/apply"?65536:(request.path=="/configs"||std::regex_match(request.path,std::regex(R"(/configs/[^/]+)")))?131072:16384))return reject(413,"payload_too_large");
+            if(!upload && length>(std::regex_match(request.path,std::regex(R"(/projects/transfers/[0-9a-f]{32}/apply)"))?16777216:std::regex_match(request.path,std::regex(R"(/files/[^/]+/encrypted-content)"))?12599296:text_edit?2097152:request.path=="/calendar-sync/apply"?65536:(request.path=="/configs"||std::regex_match(request.path,std::regex(R"(/configs/[^/]+)")))?131072:16384))return reject(413,"payload_too_large");
         }
         if(request.has_header("Transfer-Encoding") && request.method!="POST" && request.method!="PATCH" && request.method!="PUT" && request.method!="DELETE")return reject(400,"unexpected_body");
         std::string timer_allow;
@@ -199,6 +199,9 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         else if(request.path=="/projects")timer_allow="GET, HEAD, POST, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/projects/[^/]+)")))timer_allow="GET, HEAD, PATCH, DELETE, OPTIONS";
         if(request.path=="/files/explorer")timer_allow="GET, HEAD, OPTIONS";
+        else if(std::regex_match(request.path,std::regex(R"(/files/[^/]+/encryption)")))timer_allow="GET, HEAD, OPTIONS";
+        else if(std::regex_match(request.path,std::regex(R"(/files/[^/]+/(encrypt|decrypt))")))timer_allow="POST, OPTIONS";
+        else if(std::regex_match(request.path,std::regex(R"(/files/[^/]+/encrypted-content)")))timer_allow="PUT, OPTIONS";
         else if(request.path=="/files/downloads")timer_allow="POST, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/files/downloads/[0-9a-f]{32})")))timer_allow="GET, HEAD, DELETE, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/files/downloads/[0-9a-f]{32}/content)")))timer_allow="GET, HEAD, OPTIONS";

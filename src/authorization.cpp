@@ -44,6 +44,10 @@ const std::vector<RoutePolicy>& route_policies(){
         add("PUT","/connections/{id}/calendar-sync",{"admin.connections"});
         add("POST","/connections/{id}/calendar-sync/run",{"admin.connections"});
         add("GET","/connections/{id}/calendar-sync/conflicts",{"admin.connections"});
+        add("GET","/files/{id}/encryption",{"files.read"});
+        add("POST","/files/{id}/encrypt",{"files.read","files.write"});
+        add("POST","/files/{id}/decrypt",{"files.read"});
+        add("PUT","/files/{id}/encrypted-content",{"files.read","files.write"});
         for(auto path:{"/budget/explorer","/budget/summary","/budget/forecast","/budget/expenses","/budget/expenses/{id}","/budget/subscriptions","/budget/subscriptions/{id}"})add("GET",path,{"budget.read"});
         for(auto path:{"/budget/expenses","/budget/subscriptions"})add("POST",path,{"budget.write"});
         for(auto path:{"/budget/expenses/{id}","/budget/subscriptions/{id}"}){add("PATCH",path,{"budget.write"});add("DELETE",path,{"budget.write"});}
@@ -129,6 +133,7 @@ bool Authorization::body(const httplib::Request& req,httplib::Response& res)cons
     auto packet=nlohmann::json::parse(req.body,nullptr,false);
     if(!packet.is_object())return true;
     if(req.path.rfind("/connections",0)==0)return true;
+    if(req.method=="POST"&&std::regex_match(req.path,std::regex(R"(/files/[^/]+/decrypt)"))&&(packet.value("mode",nlohmann::json(nullptr))=="full"||packet.value("mode",nlohmann::json(nullptr))=="edit")&&!permitted(*identity,"files.write"))return deny(res,403,"forbidden");
     for(auto field:{"source_device","device_id"})if(packet.contains(field)&&!packet[field].is_null()){
         if(!packet[field].is_string()||!acts_as(*identity,packet[field].get<std::string>()))return deny(res,403,"device_identity_mismatch");
     }

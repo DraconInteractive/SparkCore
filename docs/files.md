@@ -385,3 +385,10 @@ file deletion removes its leases automatically. No file contents are duplicated.
 
 Deploy with a rebuild and `./scripts/setup-db.sh` before restarting; migration
 `023_file_leases.sql` creates the table and setup grants the application access.
+
+## Password encryption
+
+The explorer provides Encrypt, Decrypt (View), Decrypt (Edit) and Decrypt (Full).
+Temporary viewing/editing leaves storage encrypted; encrypted edits save new
+ciphertext. See [file encryption](file-encryption.md) for the API, format,
+permissions and security boundary.

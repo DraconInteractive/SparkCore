@@ -22,6 +22,10 @@ int main(){try{
     req.method="POST";req.path="/timers";provider->who.permissions={"timers.write"};
     req.body=R"({"duration_seconds":10,"source_device":"other"})";httplib::Response denied;check(!auth.body(req,denied),"impersonation");
     provider->who.permissions.insert("devices.delegate");httplib::Response delegated;check(auth.body(req,delegated),"explicit delegation");
+    req.method="POST";req.path="/files/test/decrypt";provider->who.permissions={"files.read"};
+    req.body=R"({"password":"not-logged","mode":"view"})";httplib::Response view;check(auth.body(req,view),"read-only temporary decrypt");
+    for(const auto* mode:{"edit","full"}){req.body=nlohmann::json{{"password","not-logged"},{"mode",mode}}.dump();httplib::Response denied;check(!auth.body(req,denied)&&denied.status==403,"read-only permanent decrypt denied");}
+    provider->who.permissions.insert("files.write");httplib::Response full;check(auth.body(req,full),"writer permanent decrypt");
     req.path="/unknown";provider->who.permissions=permission_names();httplib::Response unknown;check(!auth.request(req,unknown),"unknown endpoint");
     Identity reader{"id","watch","device",{"notifications.read","events.read"}};
     check(notification_permitted(reader,{{"type","calendar.reminder"}}),"reminder permission");
