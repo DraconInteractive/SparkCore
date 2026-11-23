@@ -25,6 +25,8 @@ public:
     nlohmann::json payment(const std::string&,const nlohmann::json&) const;
     nlohmann::json forecast(const nlohmann::json&) const;
     nlohmann::json summary(const nlohmann::json&) const;
+    nlohmann::json mortgage() const;
+    nlohmann::json save_mortgage(const nlohmann::json&,uint64_t) const;
     void tick() const;
 };
 class BudgetScheduler {

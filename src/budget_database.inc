@@ -23,7 +23,7 @@ json budget_rows(Connection& c,bool sub,const json& f,int limit,int offset=0){st
 }
 json budget_all(Connection& c,bool sub,const json& f){auto rows=budget_rows(c,sub,f,100001);if(rows.size()>100000)throw std::invalid_argument("too_many_records");return rows;}
 }
-void BudgetStore::verify()const{Connection c(config_);for(bool sub:{false,true}){Statement q(c,"SELECT "+budget_projection+" FROM "+budget_table(sub)+" LIMIT 0");q.execute();q.rows();}for(auto table:{"budget_payments","budget_reminders"}){Statement q(c,std::string("SELECT JSON_OBJECT('id',subscription_id,'date',scheduled_date)")+(std::string(table)=="budget_payments"?", expense_id":"")+" FROM "+table+" LIMIT 0");q.execute();}}
+void BudgetStore::verify()const{Connection c(config_);{Statement q(c,"SELECT JSON_OBJECT('data',JSON_EXTRACT(data,'$'),'revision',revision,'updated_at',updated_at) FROM budget_mortgage WHERE id=1");q.execute();if(q.rows().empty())throw DatabaseError("Mortgage schema is not provisioned");}for(bool sub:{false,true}){Statement q(c,"SELECT "+budget_projection+" FROM "+budget_table(sub)+" LIMIT 0");q.execute();q.rows();}for(auto table:{"budget_payments","budget_reminders"}){Statement q(c,std::string("SELECT JSON_OBJECT('id',subscription_id,'date',scheduled_date)")+(std::string(table)=="budget_payments"?", expense_id":"")+" FROM "+table+" LIMIT 0");q.execute();}}
 json BudgetStore::create(bool sub,const json& p)const{auto v=budget_defaults(sub,p);Connection c(config_);Transaction tx(c);if(!sub)budget_link(c,v);auto r=budget_insert(c,sub,v);budget_event(c,sub,"created",r,p.value("source_device",json(nullptr)));tx.commit();return r;}
 std::optional<json> BudgetStore::get(bool sub,const std::string& id)const{Connection c(config_);return budget_read(c,sub,id);}
 json BudgetStore::list(bool sub,const json& f)const{Connection c(config_);int limit=f.value("limit",50),offset=f.value("offset",0);auto rows=budget_rows(c,sub,f,limit+1,offset);bool more=rows.size()>size_t(limit);if(more)rows.erase(rows.end()-1);return {{sub?"subscriptions":"expenses",rows},{"limit",limit},{"offset",offset},{"has_more",more}};}
@@ -74,5 +74,19 @@ void BudgetStore::tick()const{
    Statement insert(c,"INSERT INTO budget_reminders(subscription_id,scheduled_date) VALUES (?,?)",{s["id"].get<std::string>(),s["next_billing_date"].get<std::string>()});if(insert.execute(true))append_event(c,"budget.subscription.reminder","/budget/subscriptions/"+s["id"].get<std::string>(),nullptr,{{"subscription_id",s["id"]},{"scheduled_date",s["next_billing_date"]}});
   }tx.commit();
  }
+}
+}
+
+namespace spark {
+namespace {
+json read_mortgage(Connection& c,bool lock=false){Statement q(c,"SELECT JSON_OBJECT('mortgage',JSON_EXTRACT(data,'$'),'revision',revision,'updated_at',DATE_FORMAT(updated_at,'%Y-%m-%dT%H:%i:%s.%fZ')) FROM budget_mortgage WHERE id=1"+std::string(lock?" FOR UPDATE":""));q.execute();auto rows=q.rows();if(rows.empty())throw DatabaseError("Mortgage schema is not provisioned");return rows[0];}
+json with_mortgage_stats(json value){value["stats"]=value["mortgage"].is_null()?json(nullptr):mortgage_stats(value["mortgage"]);return value;}
+}
+json BudgetStore::mortgage()const{Connection c(config_);return with_mortgage_stats(read_mortgage(c));}
+json BudgetStore::save_mortgage(const json& input,uint64_t revision)const{
+ auto data=input.is_null()?json(nullptr):validate_mortgage(input);Connection c(config_);Transaction tx(c);auto prior=read_mortgage(c,true);if(prior["revision"]!=revision)throw BudgetConflict();
+ if(prior["mortgage"]==data){tx.commit();return with_mortgage_stats(prior);}
+ if(revision>=9007199254740991ULL)throw std::invalid_argument("revision_exhausted");
+ Statement update(c,"UPDATE budget_mortgage SET data=?,revision=revision+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=1",{data.is_null()?std::nullopt:std::optional<std::string>(data.dump())});update.execute();auto saved=read_mortgage(c);append_event(c,"budget.mortgage.updated","/budget/mortgage",nullptr,{{"revision",saved["revision"]},{"configured",!data.is_null()}});tx.commit();return with_mortgage_stats(saved);
 }
 }

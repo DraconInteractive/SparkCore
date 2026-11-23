@@ -6,6 +6,16 @@ inline constexpr const char* budget_explorer_html=R"HTML(<!doctype html>
 body{margin:0;background:#101820;color:#e5edf3;font:16px system-ui}main{max-width:1250px;margin:auto;padding:24px}a{color:#78dfcc}section,dialog{background:#1a2935;color:inherit;border:1px solid #456;border-radius:10px;padding:20px;margin:20px 0}dialog{margin:auto;max-height:85vh;overflow:auto;max-width:650px}dialog::backdrop{background:#000a}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}label{display:block}input,select,textarea,button{font:inherit;border-radius:5px;padding:8px;border:1px solid #56717f;background:#101820;color:inherit;box-sizing:border-box}input,select,textarea{width:100%;margin:6px 0 12px}button{cursor:pointer;margin:6px 8px 6px 0;background:#263f4b}button:disabled{opacity:.5;cursor:default}textarea{min-height:80px}table{border-collapse:collapse;width:100%}td,th{padding:10px;border-bottom:1px solid #456;text-align:left;overflow-wrap:anywhere}.scroll{overflow:auto}#status{white-space:pre-wrap;color:#ffd49a;min-height:1.5em}small{color:#b5cad5}fieldset{border:0;padding:0}[hidden]{display:none!important}
 </style>
 <main><a href="/">SPARK dashboard</a> · <a href="/api/docs">API reference</a><h1>Budget</h1><p>Actual spending and expected subscriptions. Dates use Australia/Perth; amounts include any GST you enter.</p><p id="status" role="status"></p>
+<section><h2>Mortgage</h2><p>A manually maintained snapshot. Estimates keep the rate, monthly repayment and offset balance constant. The offset reduces interest but is not spent to pay off the loan.</p>
+<p id="mortgage-message" role="status"></p><form id="mortgage-form"><fieldset id="mortgage-fields"><div class="grid">
+<label>Remaining principal<input id="mortgage-principal" type="number" min="0" max="10000000000" step="0.01" required></label>
+<label>Annual interest rate (%)<input id="mortgage-rate" type="number" min="0" max="100" step="0.01" required></label>
+<label>Monthly repayment<input id="mortgage-payment" type="number" min="0" max="10000000000" step="0.01" required></label>
+<label>Offset account balance<input id="mortgage-offset" type="number" min="0" max="10000000000" step="0.01" value="0" required></label>
+<label>Currency<input id="mortgage-currency" pattern="[A-Z]{3}" maxlength="3" value="AUD" required></label>
+<label>Snapshot date (Perth)<input id="mortgage-date" type="date" required></label>
+</div></fieldset><button id="mortgage-save" data-spark-permission="budget.write" disabled>Save snapshot</button><button type="button" id="mortgage-preview" disabled>Preview estimate</button><button type="button" id="mortgage-reload" disabled>Reload saved</button><button type="button" id="mortgage-delete" data-spark-permission="budget.write" disabled>Clear saved mortgage</button></form>
+<div id="mortgage-stats"></div><p><small>Monthly approximation: interest is charged before each payment, rounded to cents. Assumes a 100% offset, no fees and no future changes. Most lenders accrue interest daily. Estimates start at the snapshot date and do not automatically reduce the saved balance or create expenses. Projection limit: 100 years.</small></p></section>
 <section><h2>Records</h2><form id="filters"><div class="grid">
 <label>Show<select id="kind"><option value="expenses">Expenses</option><option value="subscriptions">Subscriptions</option></select></label>
 <label>Currency (blank = all)<input id="filter-currency" maxlength="3" placeholder="AUD"></label><label>Category (exact)<input id="filter-category"></label>
@@ -44,6 +54,33 @@ $('close-edit').onclick=()=>{if(!busy)$('editor').close();};$('close-payment').o
 $('new').onclick=()=>{if(!busy&&canWrite)edit(null);};$('filters').onsubmit=e=>{e.preventDefault();if(!busy){offset=0;refresh();}};$('previous').onclick=()=>{if(!busy){offset=Math.max(0,offset-25);refresh();}};$('next').onclick=()=>{if(!busy){offset+=25;refresh();}};
 $('kind').onchange=()=>{offset=0;const sub=$('kind').value==='subscriptions';$('state-filter').hidden=!sub;for(const el of document.querySelectorAll('.expense-filter'))el.hidden=sub;$('new').textContent=sub?'Add subscription':'Add expense';refresh();};
 $('forecast-from').value=today();const end=new Date(today()+'T00:00:00Z');end.setUTCDate(end.getUTCDate()+29);$('forecast-to').value=end.toISOString().slice(0,10);
-sparkSession.ready.then(async s=>{canWrite=s.mode==='open'||s.permissions.includes('budget.write');$('new').disabled=!canWrite;await refresh();}).catch(e=>status(e.message));
+let mortgageRevision=0,mortgageConfigured=false,mortgageReady=false,mortgageBusy=false,mortgageDirty=false;
+function mortgageLock(value){mortgageBusy=value;$('mortgage-save').disabled=value||!canWrite||!mortgageReady;$('mortgage-delete').disabled=value||!canWrite||!mortgageConfigured||!mortgageReady;for(const id of ['mortgage-preview','mortgage-reload'])$(id).disabled=value||!mortgageReady;$('mortgage-fields').disabled=value||!mortgageReady;}
+function showMortgageStats(stats,draft=false){const out=$('mortgage-stats');out.replaceChildren();if(!stats){node('p','No mortgage snapshot saved.',out);return;}node('h3',draft?'Preview — not saved':'Saved snapshot estimate',out);node('p','Based on balances as of '+stats.as_of+'.',out);
+ const currency=stats.currency,months=stats.months_remaining;
+ if(stats.status==='paid_off')node('p','Mortgage paid off: no remaining principal.',out);
+ else if(stats.status==='payment_too_low')node('p','The monthly repayment does not reduce the principal. No payoff date can be estimated with these inputs.',out);
+ else if(stats.status==='horizon_exceeded')node('p','The mortgage would take more than 100 years to repay with these inputs.',out);
+ else node('h3',stats.years_remaining+' years, '+stats.additional_months_remaining+' months remaining ('+months+' payments)',out);
+ const list=node('dl','',out);const metric=(label,value)=>{node('dt',label,list);node('dd',value,list);};
+ metric('Balance charged interest',money(stats.interest_bearing_balance_cents,currency));metric('First month interest',money(stats.first_month_interest_cents,currency));metric('First month principal reduction',money(stats.first_month_principal_reduction_cents,currency));
+ if(stats.remaining_interest_cents!==null){metric('Estimated interest remaining',money(stats.remaining_interest_cents,currency));metric('Estimated payments remaining',money(stats.remaining_payments_cents,currency));metric('Final payment',money(stats.final_payment_cents,currency));}
+ metric('First month interest saved by offset',money(stats.first_month_offset_interest_saving_cents,currency));
+ if(stats.months_saved_by_offset!==null){metric('Time saved by offset',stats.months_saved_by_offset+' months');metric('Interest saved by offset',money(stats.interest_saved_by_offset_cents,currency));}
+ else node('p','Lifetime offset savings cannot be calculated: the no-offset scenario does not pay off within the projection limit.',out);
+}
+function populateMortgage(record){mortgageRevision=record.revision;mortgageConfigured=record.mortgage!==null;const p=record.mortgage;
+ for(const [id,value] of Object.entries({'mortgage-principal':p?(p.remaining_principal_cents/100).toFixed(2):'','mortgage-rate':p?(p.annual_interest_rate_bps/100).toFixed(2):'','mortgage-payment':p?(p.monthly_payment_cents/100).toFixed(2):'','mortgage-offset':p?(p.offset_balance_cents/100).toFixed(2):'0.00','mortgage-currency':p?.currency||'AUD','mortgage-date':p?.as_of||today()}))$(id).value=value;
+ mortgageDirty=false;mortgageReady=true;showMortgageStats(record.stats);mortgageLock(false);
+}
+function mortgagePacket(){return {remaining_principal_cents:cents('mortgage-principal'),annual_interest_rate_bps:cents('mortgage-rate'),monthly_payment_cents:cents('mortgage-payment'),offset_balance_cents:cents('mortgage-offset'),currency:$('mortgage-currency').value,as_of:$('mortgage-date').value};}
+async function loadMortgage(){mortgageLock(true);try{populateMortgage(await api('/budget/mortgage'));$('mortgage-message').textContent='';}catch(e){$('mortgage-message').textContent=e.message;}finally{mortgageLock(false);}}
+$('mortgage-form').oninput=()=>{mortgageDirty=true;};
+$('mortgage-form').onsubmit=async e=>{e.preventDefault();if(mortgageBusy||!canWrite||!mortgageReady)return;mortgageLock(true);try{const saved=await api('/budget/mortgage','PUT',{...mortgagePacket(),revision:mortgageRevision});populateMortgage(saved);$('mortgage-message').textContent='Mortgage snapshot saved.';}catch(e){$('mortgage-message').textContent=e.message;}finally{mortgageLock(false);}};
+$('mortgage-preview').onclick=async()=>{if(mortgageBusy||!$('mortgage-form').reportValidity())return;mortgageLock(true);try{const result=await api('/budget/mortgage/estimate','POST',mortgagePacket());showMortgageStats(result.stats,true);$('mortgage-message').textContent='Preview only. The saved mortgage is unchanged.';}catch(e){$('mortgage-message').textContent=e.message;}finally{mortgageLock(false);}};
+$('mortgage-reload').onclick=()=>{if(!mortgageBusy&&(!mortgageDirty||confirm('Discard the mortgage draft and reload saved values?')))loadMortgage();};
+$('mortgage-delete').onclick=async()=>{if(mortgageBusy||!canWrite||!mortgageConfigured||!confirm('Clear the saved mortgage snapshot? This does not delete expenses or subscriptions.'))return;mortgageLock(true);try{populateMortgage(await api('/budget/mortgage?revision='+mortgageRevision,'DELETE'));$('mortgage-message').textContent='Saved mortgage cleared.';}catch(e){$('mortgage-message').textContent=e.message;}finally{mortgageLock(false);}};
+window.addEventListener('beforeunload',e=>{if(mortgageDirty){e.preventDefault();e.returnValue='';}});
+sparkSession.ready.then(async s=>{canWrite=s.mode==='open'||s.permissions.includes('budget.write');$('new').disabled=!canWrite;await Promise.all([refresh(),loadMortgage()]);}).catch(e=>status(e.message));
 </script></html>)HTML";
 }

@@ -158,3 +158,89 @@ GST constraints, revision conflicts, currency separation, forecasts, concurrent
 payment deduplication, reminders, notifications and the API contract. It never uses
 the configured main/test instances. `scripts/test-budget-page.py` exercises the UI
 in headless Firefox using a mock API.
+
+## Mortgage state tracker
+
+The Mortgage section in `/budget/explorer` stores one manually maintained snapshot:
+remaining principal, nominal annual interest rate, monthly repayment, and offset
+account balance. Currency defaults to AUD; the snapshot date (`as_of`) defaults to
+today in Perth. Use Preview estimate to try other repayments/rates/offset balances
+without saving. Clear saved mortgage removes the snapshot, not expenses or subscriptions.
+Read-only budget clients can preview scenarios but cannot save or clear the snapshot.
+
+Deploy migration `028_mortgage.sql` via `./scripts/setup-db.sh`, rebuild and restart.
+Existing `budget.read` and `budget.write` permissions apply; no new token grants.
+No assistant tool access, automatic balance changes, expense creation or subscription
+forecast integration is introduced. Keep the snapshot current by entering actual
+balances; its projection always starts at its displayed date, not the date of a GET.
+
+| Endpoint | Purpose | Permission |
+| --- | --- | --- |
+| `GET /budget/mortgage` | Saved snapshot, revision, update timestamp and derived stats; mortgage/stats null if not configured | `budget.read` |
+| `PUT /budget/mortgage` | Replace snapshot with all four inputs and current revision (initially 0) | `budget.write` |
+| `DELETE /budget/mortgage?revision=...` | Clear snapshot; returns empty state with advanced revision | `budget.write` |
+| `POST /budget/mortgage/estimate` | Compute an unsaved scenario using the same inputs, without revision | `budget.read` |
+
+Example PUT body:
+
+```json
+{
+  "revision": 0,
+  "remaining_principal_cents": 50000000,
+  "annual_interest_rate_bps": 600,
+  "monthly_payment_cents": 350000,
+  "offset_balance_cents": 5000000,
+  "currency": "AUD",
+  "as_of": "2026-11-23"
+}
+```
+
+All four numerical inputs are required. Monetary inputs are integer cents from 0
+to 1,000,000,000,000 (10 billion units). The annual rate is integer basis points
+from 0 to 10,000: **600 = 6.00%**, 625 = 6.25%. Currency uses the existing budget
+convention of 1/100 units, with no exchange conversion. Dates use YYYY-MM-DD,
+1970–2199. Unknown fields, fractions in integer fields, negatives, duplicates and
+invalid dates are rejected. PUT/DELETE require the current revision, returning
+409 on a conflict. Clear retains a revision tombstone, preventing a stale client
+from silently recreating an old snapshot. Identical saves do not advance revision.
+Committed saves/clears emit `budget.mortgage.updated` with revision and a configured
+boolean; TCP readers need `budget.read` plus `notifications.read`. Preview has no
+storage or notification side effects.
+
+### Calculation and interpretation
+
+Each simulated month charges rounded interest on `max(principal - offset, 0)` at
+the annual rate divided by 12, then subtracts the monthly repayment. The final
+payment is capped to the remaining principal plus that month's interest. Money
+arithmetic uses integer cents and exact rational monthly rates, rounding half cents
+upward. First payment is assumed one month after the snapshot.
+
+The offset is a **constant 100% offset balance**. It reduces interest but is never
+withdrawn or automatically applied against the principal. A fully offset loan still
+requires principal repayments. This distinction follows
+[Moneysmart's explanation of offset accounts](https://moneysmart.gov.au/home-loans/mortgage-offset-accounts).
+Most lenders accrue interest daily; this monthly approximation does not reproduce
+daily account movements, lender-specific rounding, fees, future rates or redraws.
+
+Stats include:
+
+- `months_remaining`, `years_remaining`, `additional_months_remaining`.
+- `remaining_interest_cents`, `remaining_payments_cents`, `final_payment_cents`.
+- `interest_bearing_balance_cents`, `first_month_interest_cents`,
+  `first_month_principal_reduction_cents` (negative if the balance would grow).
+- `first_month_offset_interest_saving_cents`.
+- `without_offset`: the same payoff projection with zero offset.
+- `interest_saved_by_offset_cents`, `months_saved_by_offset`: lifetime comparisons
+  only when both scenarios repay within the projection horizon; otherwise null.
+- `assumptions`, `as_of`, and `currency`.
+
+`status` is `paid_off` for zero principal (zero months/cost), `amortizing` for a
+finite payoff, `payment_too_low` when payments cannot reduce the balance, or
+`horizon_exceeded` when payoff is beyond the 1,200-month/100-year calculation limit.
+For the latter two states, payoff duration, lifetime interest, total payments and
+final payment are null, rather than presenting partial or infinite totals as a
+complete estimate. These are estimates from supplied values, not lender payout quotes.
+
+Build `mortgage_tests`, `budget_tests`, `authorization_tests`, `spark_tests` and
+`spark_server`, then run `scripts/test-mortgage.sh` for disposable database tests.
+`mortgage_tests` alone also runs mathematical checks without a database.

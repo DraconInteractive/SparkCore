@@ -48,6 +48,7 @@ const std::vector<RoutePolicy>& route_policies(){
         add("POST","/files/{id}/encrypt",{"files.read","files.write"});
         add("POST","/files/{id}/decrypt",{"files.read"});
         add("PUT","/files/{id}/encrypted-content",{"files.read","files.write"});
+        add("GET","/budget/mortgage",{"budget.read"});add("POST","/budget/mortgage/estimate",{"budget.read"});add("PUT","/budget/mortgage",{"budget.write"});add("DELETE","/budget/mortgage",{"budget.write"});
         for(auto path:{"/budget/explorer","/budget/summary","/budget/forecast","/budget/expenses","/budget/expenses/{id}","/budget/subscriptions","/budget/subscriptions/{id}"})add("GET",path,{"budget.read"});
         for(auto path:{"/budget/expenses","/budget/subscriptions"})add("POST",path,{"budget.write"});
         for(auto path:{"/budget/expenses/{id}","/budget/subscriptions/{id}"}){add("PATCH",path,{"budget.write"});add("DELETE",path,{"budget.write"});}

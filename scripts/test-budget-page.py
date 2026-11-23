@@ -36,6 +36,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
   elif path=='/auth/client.js':self.send('window.sparkSession={ready:Promise.resolve({mode:"open",permissions:[]})};','application/javascript')
   elif path in ['/budget/expenses','/budget/subscriptions']:
    kind=path.split('/')[-1];self.send({kind:records[kind],'has_more':False,'offset':0,'limit':25})
+  elif path=='/budget/mortgage':self.send({'mortgage':None,'stats':None,'revision':0})
   elif path=='/budget/summary':self.send({'currencies':{}})
   elif path=='/budget/forecast':self.send({'mode':'patterns','currencies':{'AUD':{'total_cents':3100,'subscription_cents':1200,'pattern_cents':1900,'history_expense_count':1}},'assumptions':{'history_days':90,'history_from':'2026-01-01','history_to':'2026-03-31','warning':'Estimate only'},'overdue_subscriptions':[],'charges':[]})
   else:self.send({},status=404)

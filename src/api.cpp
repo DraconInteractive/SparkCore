@@ -31,7 +31,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.66.0";
+constexpr auto api_version = "1.67.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -219,7 +219,9 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         if(std::regex_match(request.path,std::regex(R"(/connections/[0-9a-f]{32}/calendar-sync)")))timer_allow="GET, HEAD, PUT, OPTIONS";
         if(std::regex_match(request.path,std::regex(R"(/connections/[0-9a-f]{32}/calendar-sync/run)")))timer_allow="POST, OPTIONS";
         if(std::regex_match(request.path,std::regex(R"(/connections/[0-9a-f]{32}/calendar-sync/conflicts)")))timer_allow="GET, HEAD, OPTIONS";
-        if(request.path=="/budget/expenses"||request.path=="/budget/subscriptions")timer_allow="GET, HEAD, POST, OPTIONS";
+        if(request.path=="/budget/mortgage")timer_allow="GET, HEAD, PUT, DELETE, OPTIONS";
+        else if(request.path=="/budget/mortgage/estimate")timer_allow="POST, OPTIONS";
+        else if(request.path=="/budget/expenses"||request.path=="/budget/subscriptions")timer_allow="GET, HEAD, POST, OPTIONS";
         else if(request.path=="/budget/explorer"||request.path=="/budget/summary"||request.path=="/budget/forecast")timer_allow="GET, HEAD, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/budget/(expenses|subscriptions)/[^/]+)")))timer_allow="GET, HEAD, PATCH, DELETE, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/budget/subscriptions/[^/]+/payments)")))timer_allow="POST, OPTIONS";

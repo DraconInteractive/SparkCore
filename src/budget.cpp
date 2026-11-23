@@ -1,3 +1,4 @@
+#include "mortgage.hpp"
 #include "budget.hpp"
 #include "budget_explorer.hpp"
 #include "bounded_body.hpp"
@@ -47,6 +48,7 @@ json budget_validate(json p,bool sub){
 BudgetScheduler::BudgetScheduler(std::shared_ptr<BudgetStore> store){worker_=std::thread([this,store]{RetryLog retry("budget.scheduler");std::unique_lock<std::mutex> lock(mutex_);while(!stopping_){lock.unlock();try{store->tick();retry.success();}catch(const std::exception& e){retry.failure(e);}lock.lock();wake_.wait_for(lock,std::chrono::seconds(30),[this]{return stopping_;});}});}
 BudgetScheduler::~BudgetScheduler(){{std::lock_guard<std::mutex> lock(mutex_);stopping_=true;}wake_.notify_all();worker_.join();}
 void configure_budget(httplib::Server& server,std::shared_ptr<BudgetStore> store,std::shared_ptr<Authorization> auth){
+ configure_mortgage(server,store,auth);
  server.Get("/budget/explorer",[](const auto&,auto& res){res.set_header("Cache-Control","no-store");res.set_content(budget_explorer_html,"text/html; charset=utf-8");});
  auto handler=[store](const httplib::Request& req,httplib::Response& res){
   auto reply=[&](int status,const json& body){res.status=status;res.set_header("Cache-Control","no-store");res.set_content(body.dump(),"application/json");};
@@ -101,7 +103,7 @@ namespace spark {
 nlohmann::json budget_endpoints(){
  json expense={{"id","12345678-1234-1234-1234-123456789abc"},{"name","Groceries"},{"amount_cents",5500},{"currency","AUD"},{"gst_cents",500},{"category","Food"},{"notes",""},{"spent_on","2026-11-20"},{"subscription_id",nullptr},{"revision",1},{"created_at","2026-11-20T01:00:00.000000Z"},{"updated_at","2026-11-20T01:00:00.000000Z"}};
  json subscription=expense;subscription.erase("spent_on");subscription.erase("subscription_id");subscription.update({{"name","Music"},{"category","Entertainment"},{"amount_cents",1200},{"gst_cents",nullptr},{"cadence","monthly"},{"next_billing_date","2026-11-30"},{"billing_day",30},{"end_date",nullptr},{"status","active"},{"reminder_days",2}});
- json out=json::array();
+ json out=mortgage_endpoints();
  auto add=[&](const std::string& method,const std::string& path,const std::string& description,const json& body,const json& result,int status=200){out.push_back({{"method",method},{"path",path},{"description",description},{"input",{{"body",body}}},{"output",{{"status",status},{"body",result}}},{"access",{{"permission",method=="GET"?"budget.read":"budget.write"}}},{"errors",{{"400","invalid_or_missing_field, unknown_field:<name>, invalid_amount_cents, invalid_gst_cents, invalid_date, invalid_date_range, invalid_currency, invalid_filter, invalid_mode, forecast_in_past, revision_required, duplicate_json_key"},{"401","unauthorized"},{"403","forbidden, device_identity_mismatch"},{"404","budget_item_not_found, subscription_not_found"},{"409","revision_conflict, payment_schedule_changed, subscription_inactive, too_many_records"},{"413","payload_too_large"},{"415","unsupported_media_type"},{"503","database_unavailable"}}}});};
  for(bool sub:{false,true}){
   std::string base=sub?"/budget/subscriptions":"/budget/expenses",label=sub?"subscription":"expense";auto record=sub?subscription:expense;auto input=record;for(auto k:{"id","revision","created_at","updated_at"})input.erase(k);

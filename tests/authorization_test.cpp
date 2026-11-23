@@ -32,6 +32,7 @@ int main(){try{
     for(const auto& type:{"timer.expired","file.created","project.updated","command.available","command.updated","device.updated","unknown"})check(!notification_permitted(reader,{{"type",type}}),"notification disclosure");
     check(!notification_permitted(reader,{{"type","budget.expense.created"}}),"financial notification denied without budget grant");
     reader.permissions={"budget.read","notifications.read"};
+    check(notification_permitted(reader,{{"type","budget.mortgage.updated"}}),"mortgage notifications use budget read grant");
     check(notification_permitted(reader,{{"type","budget.subscription.reminder"}}),"budget reminder allowed");
     reader.permissions={"budget.read"};
     check(!notification_permitted(reader,{{"type","budget.expense.updated"}}),"budget notifications need feed grant");
