@@ -31,7 +31,7 @@
 namespace spark {
 namespace {
 using nlohmann::json;
-constexpr auto api_version = "1.67.0";
+constexpr auto api_version = "1.68.0";
 struct Endpoint {
     std::string path;
     std::string description;
@@ -182,7 +182,7 @@ void configure_api(httplib::Server& server, std::shared_ptr<DeviceStore> registr
         else if(std::regex_match(request.path,std::regex(R"(/commands/[^/]+/(renew|complete|cancel))")))timer_allow="POST, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/devices/[^/]+/actions)")))timer_allow="GET, HEAD, PUT, OPTIONS";
         else if(std::regex_match(request.path,std::regex(R"(/devices/[^/]+/commands/claim)")))timer_allow="POST, OPTIONS";
-        if(request.path=="/" || request.path=="/admin/status" || request.path=="/admin/backup-locations") timer_allow="GET, HEAD, OPTIONS";
+        if(request.path=="/" || request.path=="/system/stats" || request.path=="/admin/status" || request.path=="/admin/backup-locations") timer_allow="GET, HEAD, OPTIONS";
         if(request.path=="/admin/restart" || request.path=="/admin/backup") {
             if(request.method!="POST") { response.status=405;response.set_header("Allow","POST");return httplib::Server::HandlerResponse::Handled; }
         }

@@ -64,7 +64,7 @@ const std::vector<RoutePolicy>& route_policies(){
         add("DELETE","/backups/jobs/completed",{"admin.backup"});add("DELETE","/backups/jobs/{id}",{"admin.backup"});add("DELETE","/backups/{id}",{"admin.backup"});add("POST","/backups/{id}/transfers",{"admin.backup"});add("POST","/backups/jobs/{id}/retry",{"admin.backup"});
         for(auto path:{"/connections","/connections/explorer"})add("GET",path,{"admin.connections"});
         add("POST","/connections",{"admin.connections"});add("PATCH","/connections/{id}",{"admin.connections"});add("DELETE","/connections/{id}",{"admin.connections"});add("POST","/connections/{id}/test",{"admin.connections"});
-        for(auto path:{"/","/health","/version","/api","/api/docs"})add("GET",path,{"discovery.read"});
+        for(auto path:{"/","/health","/version","/api","/api/docs","/system/stats"})add("GET",path,{"discovery.read"});
         for(auto path:{"/admin/credentials","/admin/credentials/explorer"})add("GET",path,{"admin.credentials"});
         for(auto path:{"/admin/google","/admin/google/explorer"})add("GET",path,{"admin.credentials"});
         for(auto path:{"/admin/google/enroll","/admin/google/sessions/revoke"})add("POST",path,{"admin.credentials"});

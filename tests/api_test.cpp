@@ -34,6 +34,23 @@ int main() {
         auto health = client.Get("/health");
         check(health && health->status == 200, "health status");
         check(nlohmann::json::parse(health->body) == nlohmann::json{{"status", "ok"}}, "health packet");
+        auto stats_response=client.Get("/system/stats");
+        check(stats_response && stats_response->status==200,"system stats status");
+        check(stats_response->get_header_value("Cache-Control")=="no-store","stats not cached");
+        auto stats=nlohmann::json::parse(stats_response->body);
+        check(stats.contains("cpu")&&stats.contains("memory")&&stats.contains("storage"),"stats shape");
+        for(const auto* key:{"memory","storage"})if(!stats[key].is_null()){
+            check(stats[key]["used_bytes"].get<uint64_t>()<=stats[key]["total_bytes"].get<uint64_t>(),"stats capacity bounds");
+            check(stats[key]["used_percent"].get<double>()>=0 && stats[key]["used_percent"].get<double>()<=100,"stats percent bounds");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+        stats=nlohmann::json::parse(client.Get("/system/stats")->body);
+        check(stats["cpu"]["usage_percent"].is_number(),"CPU interval sample");
+        check(stats["cpu"]["usage_percent"].get<double>()>=0 && stats["cpu"]["usage_percent"].get<double>()<=100,"CPU percent bounds");
+        auto stats_head=client.Head("/system/stats");
+        check(stats_head && stats_head->status==200 && stats_head->body.empty(),"stats HEAD");
+        auto stats_options=client.Options("/system/stats");
+        check(stats_options && stats_options->status==204,"stats OPTIONS");
         auto api = client.Get("/api");
         check(api && api->status == 200, "discovery status");
         auto document = nlohmann::json::parse(api->body);
@@ -43,7 +60,7 @@ int main() {
         check(document["client_setup"]["tcp"]["authenticated_resume_hello"]["after_sequence"]==42,"authenticated resume example");
         check(document["client_setup"]["tcp"]["wire_example"].get<std::string>().back()=='\n',"hello wire newline");
         check(!document["notifications"]["hello"].contains("token"),"open active hello stays open");
-        check(document["endpoints"].size() == 184, "endpoint count");
+        check(document["endpoints"].size() == 185, "endpoint count");
         for (const auto& endpoint : document["endpoints"]) {
             if(endpoint["path"].get<std::string>().rfind("/configs",0)==0 || endpoint["path"].get<std::string>().rfind("/calendar-sync",0)==0 || endpoint.contains("access") || endpoint["path"].get<std::string>().rfind("/backups",0)==0 || endpoint["path"].get<std::string>().rfind("/connections",0)==0)continue;
             if (endpoint["path"].get<std::string>().find("/commands") == 0 || endpoint["path"] == "/devices/{id}/actions" || endpoint["path"] == "/" || endpoint["path"].get<std::string>().find("/admin/") == 0 || endpoint["path"] == "/project/{id}/files" || endpoint["path"].get<std::string>().find("/projects") == 0 || endpoint["path"].get<std::string>().find("/files") == 0 || endpoint["path"] == "/api/docs" || endpoint["path"].get<std::string>().find("/daily-tasks") == 0 || endpoint["path"].get<std::string>().find("/events") == 0 || endpoint["method"] != "GET" || endpoint["path"] == "/pulse" || endpoint["path"].get<std::string>().find("/timers") == 0 || endpoint["path"] == "/devices/{id}") continue;

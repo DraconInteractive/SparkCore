@@ -12,26 +12,70 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <algorithm>
 #include <sstream>
 #include <iostream>
 #include <chrono>
 extern char **environ;
 namespace spark {
 namespace {
+// Host-wide Linux statistics. No shell commands, database access or file paths exposed.
+nlohmann::json system_stats() {
+    using json=nlohmann::json;
+    static std::mutex mutex;
+    static uint64_t previous_total=0,previous_idle=0;
+    static auto sampled=std::chrono::steady_clock::time_point{};
+    static json cpu=nullptr;
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto now=std::chrono::steady_clock::now();
+    if(now-sampled>=std::chrono::seconds(1)) {
+        std::ifstream input("/proc/stat");std::string name;
+        uint64_t user=0,nice=0,system=0,idle=0,iowait=0,irq=0,softirq=0,steal=0;
+        if(input>>name>>user>>nice>>system>>idle>>iowait>>irq>>softirq>>steal && name=="cpu") {
+            const auto total=user+nice+system+idle+iowait+irq+softirq+steal;
+            const auto inactive=idle+iowait;
+            cpu=nullptr;
+            if(previous_total && total>previous_total && inactive>=previous_idle) {
+                const double percent=100.0*(1.0-double(inactive-previous_idle)/double(total-previous_total));
+                cpu=std::clamp(percent,0.0,100.0);
+            }
+            previous_total=total;previous_idle=inactive;
+        } else {cpu=nullptr;previous_total=previous_idle=0;}
+        sampled=now;
+    }
+    json memory=nullptr,storage=nullptr;
+    std::ifstream mem("/proc/meminfo");std::string line;uint64_t total=0,available=0;bool has_available=false;
+    while(std::getline(mem,line)){std::istringstream row(line);std::string key;uint64_t kb=0;
+        if(row>>key>>kb){if(key=="MemTotal:")total=kb*1024;if(key=="MemAvailable:"){available=kb*1024;has_available=true;}}}
+    if(total && has_available){available=std::min(available,total);memory={{"total_bytes",total},{"used_bytes",total-available},{"available_bytes",available},{"used_percent",100.0*double(total-available)/double(total)}};}
+    struct statvfs disk{};
+    if(statvfs(FileStorage::default_root().c_str(),&disk)==0 && disk.f_blocks) {
+        const uint64_t size=uint64_t(disk.f_blocks)*disk.f_frsize;
+        const uint64_t free=uint64_t(disk.f_bfree)*disk.f_frsize;
+        const uint64_t usable=uint64_t(disk.f_bavail)*disk.f_frsize;
+        if(size && free<=size)storage={{"total_bytes",size},{"used_bytes",size-free},{"available_bytes",usable},{"used_percent",100.0*double(size-free)/double(size)}};
+    }
+    return {{"cpu",{{"usage_percent",cpu}}},{"memory",memory},{"storage",storage}};
+}
 std::string history_path() {
     const char* value=std::getenv("SPARK_BACKUP_HISTORY");
     return value ? value : SPARK_SOURCE_DIR "/storage/backup-locations.tsv";
 }
 constexpr const char* html=R"HTML(<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SPARK</title>
-<style>body{margin:0;background:#101820;color:#e5edf3;font:16px system-ui}main{max-width:950px;margin:auto;padding:48px 24px}h1{font-size:48px;margin-bottom:8px}p{color:#adc1ce}nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:32px 0}nav a,section{background:#1a2935;border:1px solid #324957;border-radius:12px;padding:24px}a{color:#78dfcc;text-decoration:none}nav a strong{display:block;font-size:22px;margin-bottom:8px}button,input,select{font:inherit;padding:10px;border-radius:6px;border:1px solid #56717f}button{background:#78dfcc;color:#102029;cursor:pointer}button:disabled{opacity:.5}label{display:block;margin:16px 0 6px}input,select{box-sizing:border-box;width:100%;background:#101820;color:white}dialog{max-width:520px;width:80%;background:#1a2935;color:white;border:1px solid #56717f;border-radius:12px}dialog::backdrop{background:#0009}.actions{display:flex;gap:12px;margin-top:20px}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto}#status{color:#78dfcc}</style>
+<style>body{margin:0;background:#101820;color:#e5edf3;font:16px system-ui}main{max-width:950px;margin:auto;padding:48px 24px}h1{font-size:48px;margin-bottom:8px}p{color:#adc1ce}nav{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:32px 0}nav a,section{background:#1a2935;border:1px solid #324957;border-radius:12px;padding:24px}a{color:#78dfcc;text-decoration:none}nav a strong{display:block;font-size:22px;margin-bottom:8px}button,input,select{font:inherit;padding:10px;border-radius:6px;border:1px solid #56717f}button{background:#78dfcc;color:#102029;cursor:pointer}button:disabled{opacity:.5}label{display:block;margin:16px 0 6px}input,select{box-sizing:border-box;width:100%;background:#101820;color:white}dialog{max-width:520px;width:80%;background:#1a2935;color:white;border:1px solid #56717f;border-radius:12px}dialog::backdrop{background:#0009}.actions{display:flex;gap:12px;margin-top:20px}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto}#status{color:#78dfcc}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin:0 0 24px}.stats section{padding:16px}.stats h2{font-size:16px;margin:0 0 8px}.stats strong{font-size:20px}.stats small{display:block;color:#adc1ce;margin-top:6px}</style>
 <main><h1>SPARK</h1><p>Your devices, projects and shared files.</p><div id="status" role="status">Connecting…</div>
 <nav><a href="/budget/explorer" data-spark-permission="budget.read"><strong>Budget</strong>Expenses, subscriptions and forecasts</a><a id="google-link" href="/admin/google/explorer" data-spark-permission="admin.credentials"><strong>Google login</strong>Enrol your account and manage Google sessions</a><a href="/configs/explorer" data-spark-permission="configs.read"><strong>Configs</strong>Device configuration and JSON editor</a><a href="/backups/explorer" data-spark-permission="admin.backup"><strong>Backups</strong>Manage and transfer backups</a><a href="/connections/explorer" data-spark-permission="admin.connections"><strong>Connections</strong>Manage other SPARK instances</a><a href="/assistant/explorer" data-spark-permission="assistant.use">Assistant</a> <a href="/projects/explorer"><strong>Projects</strong>Projects, boards and tasks</a><a href="/files/explorer"><strong>Files</strong>Browse, edit and share files</a><a href="/commands/explorer"><strong>Commands</strong>Run device actions and inspect results</a><a href="/api/docs"><strong>API reference</strong>Explore endpoints and packets</a><a id="credentials-link" href="/admin/credentials/explorer" data-spark-permission="admin.credentials"><strong>Device access</strong>Provision and revoke device tokens</a></nav>
+<div class="stats" aria-label="Server statistics"><section><h2>CPU</h2><strong id="cpu-stat">Loading…</strong><small>Overall server usage</small></section><section><h2>Memory</h2><strong id="memory-stat">Loading…</strong><small id="memory-detail">Used / total RAM</small></section><section><h2>Storage</h2><strong id="storage-stat">Loading…</strong><small id="storage-detail">Persistent storage filesystem</small></section></div>
 <section><h2>Server controls</h2><p>Restart briefly disconnects devices. Backup pauses ordinary REST and TCP while files and database are compressed and verified. The authenticated backup progress page stays available.</p><div class="actions"><button id="restart" data-spark-permission="admin.restart">Restart server</button><button id="backup" data-spark-permission="admin.backup">Back up storage</button></div><p><a href="/backups/progress" data-spark-permission="admin.backup">View backup progress and log</a></p><pre id="result" aria-live="polite"></pre></section></main>
 <script src="/auth/client.js"></script>
 <script>
 sparkSession.ready.then(s=>{if(s.mode==='open'){document.getElementById('credentials-link').hidden=true;document.getElementById('google-link').hidden=true;}}).catch(()=>{});
 const $=id=>document.getElementById(id);let waiting=false,locations=[],localError='';
+function bytes(n){const units=['B','KiB','MiB','GiB','TiB'];let i=0;while(n>=1024&&i<units.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+units[i];}
+async function refreshStats(){try{await sparkSession.ready;const r=await fetch('/system/stats',{cache:'no-store'});if(!r.ok)throw Error('Unavailable');const s=await r.json();$('cpu-stat').textContent=s.cpu.usage_percent===null?'Sampling…':s.cpu.usage_percent.toFixed(1)+'%';for(const kind of ['memory','storage']){const v=s[kind];$(kind+'-stat').textContent=v?v.used_percent.toFixed(1)+'%':'Unavailable';$(kind+'-detail').textContent=v?bytes(v.used_bytes)+' / '+bytes(v.total_bytes)+(kind==='storage'?' · persistent filesystem':' RAM'):'Unavailable';}}catch(e){for(const kind of ['cpu','memory','storage'])$(kind+'-stat').textContent='Unavailable';$('memory-detail').textContent='Used / total RAM';$('storage-detail').textContent='Persistent storage filesystem';}finally{setTimeout(refreshStats,5000);}}
+refreshStats();
 async function refresh(){try{const session=await sparkSession.ready;if(session.mode==='session'&&!['admin.restart','admin.backup'].every(p=>session.permissions.includes(p))){const r=await fetch('/version');if(!r.ok)throw Error('Unavailable');$('status').textContent='Online · SPARK '+(await r.json()).server_version;$('restart').disabled=$('backup').disabled=false;return;}const r=await fetch('/admin/status');if(!r.ok)throw Error('Unavailable');const s=await r.json();$('status').textContent='Online · SPARK '+s.version;const busy=s.state==='queued'||s.state==='running';$('restart').disabled=$('backup').disabled=busy;if(!busy)waiting=false;$('result').textContent=localError||s.message|| (busy?'Maintenance accepted. Waiting for SPARK to return…':'');}catch(e){$('status').textContent=waiting?'Maintenance in progress · reconnecting…':'Server unavailable · reconnecting…';}}
 async function action(path,body){$('restart').disabled=$('backup').disabled=true;try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-SPARK-Admin':'dashboard'},body:JSON.stringify(body)});const s=await r.json();if(!r.ok)throw Error(s.error);localError='';waiting=true;$('result').textContent='Maintenance accepted. This page will reconnect automatically.';}catch(e){localError=e.message;$('result').textContent=e.message;$('restart').disabled=$('backup').disabled=false;}}
 $('restart').onclick=()=>{if(confirm('Restart SPARK and disconnect devices briefly?'))action('/admin/restart',{});};
@@ -98,6 +142,7 @@ void Maintenance::execute() {
     std::lock_guard<std::mutex> guard(mutex);result=outcome;requested=0;
 }
 void configure_dashboard(httplib::Server& server,std::shared_ptr<Maintenance> state, std::shared_ptr<Authorization> auth) {
+    server.Get("/system/stats",[](const auto&,auto& res){res.set_header("Cache-Control","no-store");res.set_content(system_stats().dump(),"application/json");});
     server.Get("/",[](const auto&,auto& res){res.set_content(html,"text/html; charset=utf-8");});
     server.Get("/admin/status",[state](const auto&,auto& res){nlohmann::json body;{std::lock_guard<std::mutex> guard(state->mutex);body=state->result;}body["version"]=SPARK_VERSION;res.set_content(body.dump(-1,' ',false,nlohmann::json::error_handler_t::replace),"application/json");});
     server.Get("/admin/backup-locations",[](const auto&,auto& res){nlohmann::json locations=nlohmann::json::array();std::ifstream input(history_path());std::string line;while(locations.size()<20 && std::getline(input,line)){auto tab=line.find('\t');if(tab!=std::string::npos)locations.push_back({{"mount",line.substr(0,tab)},{"destination",line.substr(tab+1)}});}res.set_content(nlohmann::json({{"locations",locations}}).dump(),"application/json");});
@@ -143,6 +188,9 @@ nlohmann::json dashboard_endpoints() {
         });
     };
     add("/","Human dashboard with explorer links and maintenance controls.","HTML dashboard");
+    add("/system/stats","Host-wide CPU usage across all cores, memory used excluding available cache, and filesystem usage for persistent SPARK storage (not just SPARK files). CPU is sampled at most once per second and is null until a second sample. Unavailable memory/storage are null. Requires discovery.read; no-store.",
+        {{"cpu",{{"usage_percent",12.5}}},{"memory",{{"total_bytes",8589934592LL},{"used_bytes",4294967296LL},{"available_bytes",4294967296LL},{"used_percent",50.0}}},{"storage",{{"total_bytes",100000000000LL},{"used_bytes",40000000000LL},{"available_bytes",55000000000LL},{"used_percent",40.0}}}});
+    endpoints.back()["access"]={{"permission","discovery.read"}};
     add("/admin/status","Latest maintenance state: idle, queued, succeeded or failed. During backup use /admin/backup-status for durable stage, activity and logs. A minimal status listener stays available during backup.",
         {{"state","succeeded"},{"message","Server restarted."},{"version",SPARK_VERSION}});
     add("/admin/backup-locations","Up to 20 previously successful backup mount and destination pairs. Drives must be mounted before use.",
